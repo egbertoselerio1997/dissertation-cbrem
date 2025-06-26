@@ -1,0 +1,24 @@
+[project]
+name = "bioreactor-implementation-june"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cupy-cuda11x>=13.4.1",
+    "highspy>=1.11.0",
+    "joblib>=1.5.1",
+    "numpy>=1.26.4",
+    "openpyxl>=3.1.5",
+    "optuna>=4.4.0",
+    "pandas>=2.3.0",
+    "plotext>=5.3.2",
+    "plotly>=6.1.2",
+    "pyomo>=6.9.2",
+    "qsdsan>=1.4.2",
+    "rich>=14.0.0",
+    "scikit-learn>=1.7.0",
+    "scikit-optimize>=0.10.2",
+    "tqdm>=4.67.1",
+    "xlsxwriter>=3.2.5",
+]
