@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "cupy-cuda11x>=13.4.1",
+    "exposan>=1.4.2",
     "highspy>=1.11.0",
     "joblib>=1.5.1",
     "numpy>=1.26.4",

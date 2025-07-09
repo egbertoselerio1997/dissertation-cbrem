@@ -160,7 +160,11 @@ def build_nlp_model(params):
     l_map = {name: i for i, name in enumerate(params['L'])}
 
     model.x = pyo.Var(model.I, bounds=lambda m, i: params['x_bounds'][i], initialize=lambda m, i: np.mean(params['x_bounds'][i]))
-    model.lambda_g = pyo.Var(model.G, bounds=(0, 1), initialize=0.5)
+    
+    # REVISION: lambda_g and lambda_o have no bounds as requested
+    model.lambda_g = pyo.Var(model.G, initialize=0.5)
+    model.lambda_o = pyo.Var(initialize=0.5)
+    
     model.X = pyo.Var(model.M)
     model.X_s = pyo.Var(model.M)
     model.Y = pyo.Var(model.K, within=pyo.NonNegativeReals)
@@ -169,13 +173,12 @@ def build_nlp_model(params):
     model.C_purch = pyo.Var(within=pyo.NonNegativeReals)
     model.CAPEX = pyo.Var(within=pyo.NonNegativeReals)
     model.AOC = pyo.Var(within=pyo.NonNegativeReals)
-    model.s_k_plus = pyo.Var(model.K, within=pyo.NonNegativeReals, initialize=0)
-    model.s_k_minus = pyo.Var(model.K, within=pyo.NonNegativeReals, initialize=0)
 
-    total_slack_penalty = params['M_penalty'] * sum(model.s_k_plus[k] + model.s_k_minus[k] for k in model.K)
-    num_goals = len(params['G'])
-    avg_lambda = (1.0 / num_goals) * sum(model.lambda_g[g] for g in model.G)
-    model.objective = pyo.Objective(expr=avg_lambda - total_slack_penalty, sense=pyo.maximize)
+    model.objective = pyo.Objective(expr=model.lambda_o, sense=pyo.maximize)
+
+    @model.Constraint(model.G)
+    def overall_satisfaction_rule(m, g):
+        return m.lambda_o <= m.lambda_g[g]
 
     @model.Constraint(model.M)
     def x_assembly_rule(m, M_name):
@@ -204,7 +207,7 @@ def build_nlp_model(params):
         rhs_const = c['Upsilon'][k_idx, 0]
         rhs_B = sum(c['B'][k_idx, m_map[m_n]] * m.X_s[m_n] for m_n in m.M)
         rhs_Theta = sum(c['Theta'][k_idx, l_map[l_p]] * m.X_s[l_p[0]] * m.X_s[l_p[1]] for l_p in m.L)
-        return term1 - term2 - term3 - (rhs_const + rhs_B + rhs_Theta) == m.s_k_plus[k] - m.s_k_minus[k]
+        return term1 - term2 - term3 - (rhs_const + rhs_B + rhs_Theta) == 0
 
     @model.Constraint()
     def reactor_volume_rule(m):
@@ -227,17 +230,43 @@ def build_nlp_model(params):
         annual_elec_cost = (aeration_power_kW + mixing_power_kW) * cp['p_elec'] * cp['H_op']
         annual_maint_cost = m.CAPEX * cp['f_maint']
         return m.AOC == annual_elec_cost + annual_maint_cost + cp['C_labor']
-
+    
+    # REVISION: Fuzzy constraints are now defined as EQUALITIES.
+    # This correctly DEFINES lambda_g based on the outcome variable x.
+    # The formula is lambda_g = 1 - (x - x_min) / (x_max - x_min)
     model.FuzzyConstraints = pyo.ConstraintList()
+    epsilon = 1e-9 # To prevent division by zero if max == target
+
+    # Effluent goals (using scaled values for better numerical stability)
     for k in model.K_goals:
         limits = params['scaled_fuzzy_goals'][k]
+        x_s = model.Y_s[k]
+        x_min_s = limits['target_s']
+        x_max_s = limits['max_s']
+        denominator_s = x_max_s - x_min_s
         model.FuzzyConstraints.add(
-            model.Y_s[k] <= limits['max_s'] - model.lambda_g[k] * (limits['max_s'] - limits['target_s'])
+            model.lambda_g[k] == 1 - (x_s - x_min_s) / (denominator_s + epsilon)
         )
+
+    # AOC goal (using unscaled values)
     aoc_goal = params['fuzzy_goals']['AOC']
-    model.FuzzyConstraints.add(model.AOC <= aoc_goal['max'] - model.lambda_g['AOC'] * (aoc_goal['max'] - aoc_goal['target']))
+    x_aoc = model.AOC
+    x_min_aoc = aoc_goal['target']
+    x_max_aoc = aoc_goal['max']
+    denominator_aoc = x_max_aoc - x_min_aoc
+    model.FuzzyConstraints.add(
+        model.lambda_g['AOC'] == 1 - (x_aoc - x_min_aoc) / (denominator_aoc + epsilon)
+    )
+
+    # CAPEX goal (using unscaled values)
     capex_goal = params['fuzzy_goals']['CAPEX']
-    model.FuzzyConstraints.add(model.CAPEX <= capex_goal['max'] - model.lambda_g['CAPEX'] * (capex_goal['max'] - capex_goal['target']))
+    x_capex = model.CAPEX
+    x_min_capex = capex_goal['target']
+    x_max_capex = capex_goal['max']
+    denominator_capex = x_max_capex - x_min_capex
+    model.FuzzyConstraints.add(
+        model.lambda_g['CAPEX'] == 1 - (x_capex - x_min_capex) / (denominator_capex + epsilon)
+    )
     
     print("...NLP model build complete.")
     return model
@@ -262,7 +291,6 @@ def solve_and_display_results(model, params):
     print(f"Solver Status: {term_cond}")
 
     if term_cond in [pyo.TerminationCondition.optimal, pyo.TerminationCondition.locallyOptimal]:
-        total_slack = sum(pyo.value(model.s_k_plus[k]) + pyo.value(model.s_k_minus[k]) for k in model.K)
         v_reactor, c_purch, capex, aoc = (pyo.value(v) for v in [model.V_reactor, model.C_purch, model.CAPEX, model.AOC])
         cp = params['cost_params']
         f_bm = cp['F_BM']
@@ -278,10 +306,10 @@ def solve_and_display_results(model, params):
         annual_labor_cost = cp['C_labor']
 
         print("\n---> Optimal Solution Found <---\n")
-        avg_lambda = (1.0 / len(model.G)) * sum(pyo.value(model.lambda_g[g]) for g in model.G)
-        print(f"Average Satisfaction Level: {avg_lambda:.4f}")
+        lambda_o_val = pyo.value(model.lambda_o)
+        print(f"Overall Satisfaction Level (lambda_o): {lambda_o_val:.4f}")
 
-        print("\n--- Individual Goal Satisfaction (Lambda) ---")
+        print("\n--- Individual Goal Satisfaction (lambda_g) ---")
         for g in sorted(model.G):
             print(f"{g:<20}: {pyo.value(model.lambda_g[g]):.4f}")
         
@@ -318,40 +346,115 @@ def solve_and_display_results(model, params):
                 print(f"{k:<20}: {val:8.3f} (Target: {goal['target']:<4.1f}, Max: {goal['max']:<4.1f}, Satisfaction: {satisfaction:.3f})")
             else:
                 print(f"{k:<20}: {val:8.3f} (Not a primary goal)")
+        
+        # --- [START] ADDED CODE FOR SAVING RESULTS TO EXCEL ---
+        print("\n--- Saving results to data/data.xlsx ---")
+        try:
+            output_folder = 'data'
+            output_filename = 'data.xlsx'
+            output_path = os.path.join(output_folder, output_filename)
 
-        print("\n--- CLEFO Model Slack Deviation per Component ---")
-        print(f"Total Slack (sum of s_k+ and s_k-): {total_slack:.6g}")
-        print(f"{'Component':<20} | {'s_k+ (Positive Slack)':<25} | {'s_k- (Negative Slack)':<25} | {'Total Deviation'}")
-        print("-" * 80)
-        for k in sorted(model.K):
-            s_plus, s_minus = pyo.value(model.s_k_plus[k]), pyo.value(model.s_k_minus[k])
-            total_dev = s_plus + s_minus
-            if total_dev > 1e-6:
-                print(f"{k:<20} | {s_plus:<25.6g} | {s_minus:<25.6g} | {total_dev:.6g}")
+            # Ensure the output directory exists
+            os.makedirs(output_folder, exist_ok=True)
+
+            # 1. Prepare DataFrames for each sheet
+            # Sheet: optimal_satistfaction
+            satisfaction_data = {'Metric': ['Overall Satisfaction Level (lambda_o)'], 'Value': [pyo.value(model.lambda_o)]}
+            for g in sorted(model.G):
+                satisfaction_data['Metric'].append(f'Individual Goal Satisfaction ({g})')
+                satisfaction_data['Value'].append(pyo.value(model.lambda_g[g]))
+            df_satisfaction = pd.DataFrame(satisfaction_data)
+
+            # Sheet: optimal_decision_variables
+            dec_vars_data = []
+            for i in model.I:
+                dec_vars_data.append({
+                    'Variable': i,
+                    'Optimal Value': pyo.value(model.x[i]),
+                    'notes': f"Bounds: {params['x_bounds'][i]}"
+                })
+            df_decision_vars = pd.DataFrame(dec_vars_data)
+
+            # Sheet: optimal_capex_breakdown
+            capex_data = [
+                {'Component': 'Reactor Volume (V_reactor)', 'Value': v_reactor, 'Unit': 'm^3'},
+                {'Component': 'Reactor Purchase Cost (C_purch)', 'Value': c_purch, 'Unit': '$'},
+                {'Component': 'Bare-Module Factor (F_BM)', 'Value': f_bm, 'Unit': 'x'},
+                {'Component': 'Total CAPEX', 'Value': capex, 'Unit': '$'}
+            ]
+            df_capex = pd.DataFrame(capex_data)
+
+            # Sheet: optimal_aoc_breakdown
+            aoc_data = [
+                {'Component': 'Annual Aeration Cost', 'Value': annual_aeration_cost, 'Unit': '$/yr'},
+                {'Component': 'Annual Mixing Cost', 'Value': annual_mixing_cost, 'Unit': '$/yr'},
+                {'Component': 'Total Electricity Cost', 'Value': total_elec_cost, 'Unit': '$/yr'},
+                {'Component': 'Annual Maintenance Cost', 'Value': annual_maint_cost, 'Unit': '$/yr'},
+                {'Component': 'Annual Labor Cost', 'Value': annual_labor_cost, 'Unit': '$/yr'},
+                {'Component': 'Total AOC', 'Value': aoc, 'Unit': '$/yr'}
+            ]
+            df_aoc = pd.DataFrame(aoc_data)
+
+            # Sheet: optimal_predicted_effluent_quality
+            effluent_data = []
+            for k in sorted(model.K):
+                val = pyo.value(model.Y[k])
+                note = "Not a primary goal"
+                if k in params['fuzzy_goals']:
+                    goal = params['fuzzy_goals'][k]
+                    satisfaction = pyo.value(model.lambda_g[k])
+                    note = f"Target: {goal['target']:.1f}, Max: {goal['max']:.1f}, Satisfaction: {satisfaction:.3f}"
+                effluent_data.append({
+                    'Component': k,
+                    'Predicted Value (mg/L)': val,
+                    'Notes': note
+                })
+            df_effluent = pd.DataFrame(effluent_data)
+            
+            # Sheet: default_influent_quality
+            df_influent = pd.DataFrame(
+                list(params['defaults'].items()),
+                columns=['Variable', 'Value (mg/L)']
+            )
+
+            # 2. Write DataFrames to Excel file using append mode to avoid overwriting other sheets
+            # 'if_sheet_exists="replace"' will update our specific sheets but leave others untouched.
+            # This requires the 'openpyxl' engine.
+            mode = 'a' if os.path.exists(output_path) else 'w'
+            
+            with pd.ExcelWriter(
+                output_path,
+                engine='openpyxl',
+                mode=mode,
+                if_sheet_exists='replace' if mode == 'a' else None
+            ) as writer:
+                df_satisfaction.to_excel(writer, sheet_name='optimal_satistfaction', index=False)
+                df_decision_vars.to_excel(writer, sheet_name='optimal_decision_variables', index=False)
+                df_capex.to_excel(writer, sheet_name='optimal_capex_breakdown', index=False)
+                df_aoc.to_excel(writer, sheet_name='optimal_aoc_breakdown', index=False)
+                df_effluent.to_excel(writer, sheet_name='optimal_predicted_effluent', index=False)
+                df_influent.to_excel(writer, sheet_name='default_influent_quality', index=False)
+
+            print(f"...Successfully saved results to '{output_path}'.")
+
+        except Exception as e:
+            print(f"\nERROR: Failed to save results to Excel file. Reason: {e}", file=sys.stderr)
+        # --- [END] ADDED CODE FOR SAVING RESULTS TO EXCEL ---
         
         # --- Verification against Analytical Reconstruction ---
         print("\n" + "="*80)
         print("VERIFICATION: PYOMO vs. ANALYTICAL RECONSTRUCTION".center(80))
         print("="*80)
 
-        # 1. Get optimal scaled inputs from Pyomo model
         m_order = params['M']
         x_s_optimal = np.array([pyo.value(model.X_s[m]) for m in m_order]).reshape(1, -1)
-        
-        # 2. Create interaction features
         z_s_optimal = create_interaction_features_np(x_s_optimal, len(m_order))
-        
-        # 3. Predict using analytical function
         y_s_analytical = predict_analytical(x_s_optimal, z_s_optimal, params['coeffs'])
-        
-        # 4. Unscale analytical predictions
         y_analytical = params['y_scaler'].inverse_transform(y_s_analytical).flatten()
         
-        # 5. Get Pyomo predictions
         k_order = params['K']
         y_pyomo = np.array([pyo.value(model.Y[k]) for k in k_order])
         
-        # 6. Create and display comparison DataFrame
         df_compare = pd.DataFrame({
             'Component': k_order,
             'Pyomo_Prediction': y_pyomo,

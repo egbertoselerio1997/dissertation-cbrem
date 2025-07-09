@@ -46,6 +46,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "cupy-cuda11x" },
+    { name = "exposan" },
     { name = "highspy" },
     { name = "joblib" },
     { name = "numpy" },
@@ -66,6 +67,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cupy-cuda11x", specifier = ">=13.4.1" },
+    { name = "exposan", specifier = ">=1.4.2" },
     { name = "highspy", specifier = ">=1.11.0" },
     { name = "joblib", specifier = ">=1.5.1" },
     { name = "numpy", specifier = ">=1.26.4" },
@@ -352,6 +354,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/91/50/a9d80c47ff289c611ff12e63f7c5d13942c65d68125160cefd768c73e6e4/executing-2.2.0.tar.gz", hash = "sha256:5d108c028108fe2551d1a7b2e8b713341e2cb4fc0aa7dcf966fa4327a5226755", size = 978693, upload_time = "2025-01-22T15:41:29.403Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/8f/c4d9bafc34ad7ad5d8dc16dd1347ee0e507a52c3adb6bfa8887e1c6a26ba/executing-2.2.0-py2.py3-none-any.whl", hash = "sha256:11387150cad388d62750327a53d3339fad4888b39a6fe233c3afbb54ecffd3aa", size = 26702, upload_time = "2025-01-22T15:41:25.929Z" },
+]
+
+[[package]]
+name = "exposan"
+version = "1.4.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "qsdsan" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/cb/0cc5681d3004f6727721ceb70ea1e60d4051137845993b19189da8194fc6/exposan-1.4.2.tar.gz", hash = "sha256:2f27100ae1f32d1db29a630844df612480b83cbe20b40e8898419537679a566a", size = 6580735, upload_time = "2025-05-09T16:39:33.162Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/10/46ae0210d7b9975d74a0afc85d8e8578d2db2b5f27a03c745a8323cb5cd8/exposan-1.4.2-py3-none-any.whl", hash = "sha256:d395d2017a4c2c3a59f394b0150a75b04aa83ac10aaa9fbe3e93d09ed7056bc6", size = 6629287, upload_time = "2025-05-09T16:39:31.596Z" },
 ]
 
 [[package]]
