@@ -24,12 +24,12 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 FILE_PATH = os.path.join('data', 'data.xlsx')
 OUTPUT_FILE_PATH = os.path.join('data', 'training_statistics.xlsx')
 MODEL_PATH = os.path.join('models', 'clefo_model.joblib')
-TEST_SIZE = 0.2
+TEST_SIZE = 0.1
 RANDOM_STATE = 42
 
 # --- PyTorch & Model Hyperparameters ---
 NUM_EPOCHS = 10000
-LEARNING_RATE = 0.0005
+LEARNING_RATE = 0.0001
 BATCH_SIZE = -1 # Use -1 for full-batch training
 LOG_INTERVAL = 100 # This is now only for potential future use, as tqdm will show live loss
 
@@ -45,26 +45,26 @@ else:
 def load_and_prepare_data(filepath: str):
     """
     Loads and preprocesses data from the specified Excel file.
-    Handles both long and wide formats for the 'results_input' sheet.
+    Handles both long and wide formats for the 'consolidated_input' sheet.
     """
     print("1. Loading and preparing data...")
-    df_input = pd.read_excel(filepath, sheet_name='results_input')
-    df_output = pd.read_excel(filepath, sheet_name='results_output')
+    df_input = pd.read_excel(filepath, sheet_name='consolidated_input_c1')
+    df_output = pd.read_excel(filepath, sheet_name='consolidated_output_c1')
 
     if {'variable', 'default'}.issubset(df_input.columns):
-        print("   - 'results_input' is in long format. Pivoting data...")
+        print("   - 'consolidated_input' is in long format. Pivoting data...")
         df_input_wide = df_input.pivot(
             index='simulation_number', columns='variable', values='default'
         ).reset_index()
         input_cols = df_input['variable'].unique().tolist()
     else:
-        print("   - 'results_input' appears to be in wide format. Skipping pivot.")
+        print("   - 'consolidated_input' appears to be in wide format. Skipping pivot.")
         df_input_wide = df_input
         input_cols = [col for col in df_input.columns if col != 'simulation_number']
 
     data = pd.merge(df_input_wide, df_output, on='simulation_number', how='inner')
     
-    y_cols = [col for col in data.columns if col.startswith('Effluent_')]
+    y_cols = [col for col in data.columns if col.startswith('Target_')]
     Y = data[y_cols]
 
     inf_cols = sorted([col for col in input_cols if col.startswith('inf_')])

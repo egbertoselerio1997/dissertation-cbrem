@@ -63,7 +63,7 @@ def run_single_simulation(i, input_df, vary_inputs):
         effluent_data = {}
         
         for idx, comp_id in enumerate(component_ids):
-            effluent_data[f'Effluent_{comp_id} (mg/L)'] = effluent_concs[idx]
+            effluent_data[f'Target_Effluent_{comp_id} (mg/L)'] = effluent_concs[idx]
 
         run_data = {
             'simulation_number': i + 1,
