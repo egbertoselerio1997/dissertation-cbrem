@@ -103,8 +103,8 @@ def create_all_sheets():
     units_to_process = ['A2', 'O1', 'O2', 'O3']
     input_source_prefix = {'A2': 'A1_eff', 'O1': 'A2_eff', 'O2': 'O1_eff', 'O3': 'O2_eff'}
     output_source_prefix = {'A2': 'A2_eff', 'O1': 'O1_eff', 'O2': 'O2_eff', 'O3': 'O3_to_C1'}
-    volume_param = {'A2': 'V_an', 'O1': 'V_ae', 'O2': 'V_ae', 'O3': 'V_ae'}
-    kla_param = {'A2': None, 'O1': 'KLa_aer1', 'O2': 'KLa_aer1', 'O3': 'KLa_aer2'}
+    volume_param = {'A2': 'V_A2', 'O1': 'V_O1', 'O2': 'V_O2', 'O3': 'V_O3'}
+    kla_param = {'A2': 'KLa_A2', 'O1': 'KLa_O1', 'O2': 'KLa_O2', 'O3': 'KLa_O3'}
 
     all_input_cstr_rows = []
     all_output_cstr_rows = []
@@ -207,10 +207,13 @@ if __name__ == '__main__':
         print("Creating a dummy 'data.xlsx' file for demonstration purposes.")
         sim_count = 5
         input_data = {
-            'simulation_number': range(1, sim_count + 1), 'flow_rate': [1000] * sim_count,
-            'V_an': [1500] * sim_count, 'V_ae': [3000] * sim_count, 'KLa_aer1': [240] * sim_count,
-            'KLa_aer2': [120] * sim_count, 'C1_surface_area': [500] * sim_count, 'C1_height': [4] * sim_count,
-            'Q_was': [50] * sim_count, 'Q_ext': [500] * sim_count, 'O3_split_internal': [0.6] * sim_count
+            'simulation_number': range(1, sim_count + 1), 'flow_rate': [18446] * sim_count,
+            'V_A1': [1200] * sim_count, 'V_A2': [1500] * sim_count, 'V_O1': [1500] * sim_count,
+            'V_O2': [1500] * sim_count, 'V_O3': [1500] * sim_count,
+            'KLa_A1': [300] * sim_count, 'KLa_A2': [300] * sim_count, 'KLa_O1': [300] * sim_count,
+            'KLa_O2': [300] * sim_count, 'KLa_O3': [300] * sim_count,
+            'C1_surface_area': [1800] * sim_count, 'C1_height': [5] * sim_count,
+            'Q_was': [450] * sim_count, 'Q_ext': [25000] * sim_count, 'O3_split_internal': [0.7] * sim_count
         }
         df_dummy_input = pd.DataFrame(input_data)
         

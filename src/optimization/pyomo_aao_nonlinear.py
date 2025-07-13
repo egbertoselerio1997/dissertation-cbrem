@@ -4,6 +4,7 @@ import pyomo.environ as pyo
 import pandas as pd
 import joblib
 import itertools
+import traceback
 
 # --- PyTorch Class Definition (Required for loading the joblib file) ---
 # This is a placeholder required by joblib to unpickle the model file.
@@ -184,7 +185,7 @@ class WWTPPlantOptimizer:
         m.stream_out_conc = pyo.Var(m.UNITS, m.COMPONENTS, within=pyo.NonNegativeReals, initialize=10)
         m.c1_wastage_conc = pyo.Var(m.COMPONENTS, within=pyo.NonNegativeReals, initialize=10) # Specific to C1 wastage
         m.O3_split_internal = pyo.Var(within=pyo.NonNegativeReals, initialize=0.5) # Internal recycle flow from O3 to A1
-        m.Q_was = pyo.Var(within=pyo.NonNegativeReals, initialize=100) # Wastage flow from C1, predicted by its model
+        m.Q_ext = pyo.Var(within=pyo.NonNegativeReals, initialize=100) # External recycle flow from C1 to A1
 
         # --- FUZZY LOGIC VARIABLES ---
         m.lambda_o = pyo.Var(initialize=0.5)
@@ -287,10 +288,7 @@ class WWTPPlantOptimizer:
             
             # Link the unscaled output to the correct main model variable
             unified_name = self._unify_comp_name(K_name)
-            # Assumption: The clarifier model has one output that is the wastage flow Q_was.
-            # We identify it by a unique name, e.g., containing 'Q_was'.
-            if 'Q_was' in K_name:
-                 return m.Q_was == unscaled_Y
+
             if unit_type == 'clarifier' and 'Wastage' in K_name:
                 return m.c1_wastage_conc[unified_name] == unscaled_Y
             # All other outputs are main stream outputs (CSTR outputs or C1 Effluent)
@@ -334,11 +332,11 @@ class WWTPPlantOptimizer:
                 m.connections.add(m.stream_in_conc[down_unit, comp] == m.stream_out_conc[up_unit, comp])
 
         # --- A1 Inlet Mixer (Recycle streams) ---
-        # Implements: C_in_A1 * Q_total = C_inf*Q_inf + C_O3*Q_int + C_was*Q_was
+        # Implements: C_in_A1 * Q_total = C_inf*Q_inf + C_O3*Q_int + C_was*Q_ext
         m.A1_inlet_mixer = pyo.ConstraintList()
         Q_inf = m.flow_rate
         Q_int_recycle = m.O3_split_internal # Decision variable
-        Q_ext_recycle = m.Q_was # Variable predicted by C1 model
+        Q_ext_recycle = m.Q_ext # Variable predicted by C1 model
         total_flow_A1 = Q_inf + Q_int_recycle + Q_ext_recycle
 
         for comp in m.COMPONENTS:
@@ -425,11 +423,11 @@ class WWTPPlantOptimizer:
         
         # --- Satisfaction Levels ---
         print(f"Overall Satisfaction Level (lambda_o): {pyo.value(m.lambda_o):.4f}\n")
-        df_satisfaction = pd.DataFrame(
+        df_satisfaction_report = pd.DataFrame(
             [{'Goal': g, 'Satisfaction': pyo.value(m.lambda_g[g])} for g in m.GOALS]
         ).sort_values(by='Goal').set_index('Goal')
         print("--- Individual Goal Satisfaction (lambda_g) ---")
-        print(df_satisfaction)
+        print(df_satisfaction_report)
 
         # --- Decision Variables ---
         print("\n--- Optimal Decision Variables ---")
@@ -440,8 +438,8 @@ class WWTPPlantOptimizer:
             dvar_data.append({'Variable': dv, 'Unit': u, 'Value': pyo.value(m.cstr_dvars[u, dv])})
         for u, dv in m.clarifier_dvars:
             dvar_data.append({'Variable': dv, 'Unit': u, 'Value': pyo.value(m.clarifier_dvars[u, dv])})
-        df_dvars = pd.DataFrame(dvar_data).sort_values(by=['Unit', 'Variable'])
-        print(df_dvars.to_string(index=False))
+        df_dvars_report = pd.DataFrame(dvar_data).sort_values(by=['Unit', 'Variable'])
+        print(df_dvars_report.to_string(index=False))
 
         # --- Costs ---
         print("\n--- Plant-Wide Costs ---")
@@ -454,51 +452,110 @@ class WWTPPlantOptimizer:
 
         # --- Final Effluent Quality ---
         print("\n--- Final Effluent Quality (C1 Output) ---")
-        eff_data = []
+        eff_data_report = []
         for goal_name in self.effluent_goals:
             comp = self._unify_comp_name(goal_name)
             val = pyo.value(m.stream_out_conc['C1', comp])
             goal_limits = self.fuzzy_goals[goal_name]
-            eff_data.append({
+            eff_data_report.append({
                 'Component': goal_name,
                 'Value (mg/L)': val,
                 'Target': goal_limits['target'],
                 'Max': goal_limits['max']
             })
-        df_effluent = pd.DataFrame(eff_data).set_index('Component')
-        print(df_effluent)
+        df_effluent_report = pd.DataFrame(eff_data_report).set_index('Component')
+        print(df_effluent_report)
         
         print("="*80)
         
         # --- Save to Excel ---
-        # Create data directory if it doesn't exist
-        os.makedirs('data', exist_ok=True)
-        output_path = os.path.join('data', 'plant_optimization_results.xlsx')
+        output_folder = 'data'
+        output_filename = 'data.xlsx'
+        output_path = os.path.join(output_folder, output_filename)
+        os.makedirs(output_folder, exist_ok=True)
+        
         print(f"\n5. Saving detailed results to '{output_path}'...")
+
         try:
-            with pd.ExcelWriter(output_path) as writer:
-                df_satisfaction.reset_index().to_excel(writer, sheet_name='Satisfaction Levels', index=False)
-                df_dvars.to_excel(writer, sheet_name='Optimal Decision Variables', index=False)
-                df_effluent.reset_index().to_excel(writer, sheet_name='Final Effluent Quality', index=False)
-                
-                # Add cost breakdown
-                cost_data = []
-                for u in self.units:
-                    cost_data.append({'Unit': u, 'CAPEX ($)': pyo.value(getattr(m, u).CAPEX), 'AOC ($/yr)': pyo.value(getattr(m, u).AOC)})
-                cost_data.append({'Unit': 'TOTAL', 'CAPEX ($)': pyo.value(m.Total_CAPEX), 'AOC ($/yr)': pyo.value(m.Total_AOC)})
-                pd.DataFrame(cost_data).to_excel(writer, sheet_name='Cost Breakdown', index=False)
+            # 1. Prepare optimal_satisfaction
+            satisfaction_data = [{'Metric': 'Overall Satisfaction Level (lambda_o)', 'Value': pyo.value(m.lambda_o)}]
+            for g in sorted(m.GOALS):
+                satisfaction_data.append({'Metric': f'Individual Goal Satisfaction ({g})', 'Value': pyo.value(m.lambda_g[g])})
+            df_satisfaction = pd.DataFrame(satisfaction_data)
 
-                # Add key stream data
-                stream_data = []
-                for u in self.units:
-                    for c in sorted(self.all_components): # Sort for consistent output
-                        stream_data.append({'Stream': f'{u}_IN', 'Component': c, 'Concentration': pyo.value(m.stream_in_conc[u,c])})
-                        stream_data.append({'Stream': f'{u}_OUT', 'Component': c, 'Concentration': pyo.value(m.stream_out_conc[u,c])})
-                pd.DataFrame(stream_data).to_excel(writer, sheet_name='All Stream Compositions', index=False)
+            # 2. Prepare optimal_decision_variables
+            dvar_data_out = []
+            for dv in self.shared_dvars:
+                dvar_data_out.append({'Variable': dv, 'Process Unit': 'Shared', 'Optimal Value': pyo.value(getattr(m, dv))})
+            for u, dv in m.cstr_dvars:
+                dvar_data_out.append({'Variable': dv, 'Process Unit': u, 'Optimal Value': pyo.value(m.cstr_dvars[u, dv])})
+            for u, dv in m.clarifier_dvars:
+                dvar_data_out.append({'Variable': dv, 'Process Unit': u, 'Optimal Value': pyo.value(m.clarifier_dvars[u, dv])})
+            df_decision_vars = pd.DataFrame(dvar_data_out).sort_values(by=['Process Unit', 'Variable'])
+            
+            # 3. Prepare optimal_capex_breakdown
+            capex_data = []
+            capex_keywords = ['CAPEX', 'purch', 'C_const', 'C_equip', 'C_install']
+            for unit in self.units:
+                unit_type = 'cstr' if unit in self.cstr_units else 'clarifier'
+                unit_block = getattr(m, unit)
+                df_cost_calc = self.cost_calcs[unit_type]
+                for _, row in df_cost_calc.iterrows():
+                    var_name = row['Output Variable']
+                    if any(keyword in var_name for keyword in capex_keywords):
+                        value = pyo.value(getattr(unit_block, var_name))
+                        description = row['Description']
+                        capex_data.append({'Component': description, 'Value': value, 'Unit': '$', 'Notes': unit})
+            df_capex = pd.DataFrame(capex_data)
 
+            # 4. Prepare optimal_aoc_breakdown
+            aoc_data = []
+            aoc_keywords = ['AOC', 'cost', 'power', 'cons']
+            for unit in self.units:
+                unit_type = 'cstr' if unit in self.cstr_units else 'clarifier'
+                unit_block = getattr(m, unit)
+                df_cost_calc = self.cost_calcs[unit_type]
+                for _, row in df_cost_calc.iterrows():
+                    var_name = row['Output Variable']
+                    if any(keyword in var_name for keyword in aoc_keywords):
+                        value = pyo.value(getattr(unit_block, var_name))
+                        description = row['Description']
+                        aoc_data.append({'Component': description, 'Value': value, 'Unit': '$/yr', 'Notes': unit})
+            df_aoc = pd.DataFrame(aoc_data)
+
+            # 5. Prepare optimal_predicted_effluent
+            effluent_data = []
+            # Report effluent from all sequential process units (A1, A2, O1, O2, O3, C1).
+            # The main output stream from C1 is the final treated plant effluent.
+            for unit in self.units:
+                for comp in sorted(self.all_components):
+                    value = pyo.value(m.stream_out_conc[unit, comp])
+                    effluent_data.append({'Component': f'{comp}_{unit}', 'Predicted Value (mg/L)': value})
+            # Report the wastage stream from C1 separately
+            for comp in sorted(self.all_components):
+                value = pyo.value(m.c1_wastage_conc[comp])
+                effluent_data.append({'Component': f'{comp}_Wastage', 'Predicted Value (mg/L)': value})
+            df_effluent = pd.DataFrame(effluent_data)
+
+            # 6. Prepare default_influent_quality
+            influent_data = [{'Variable': self._unify_comp_name(k), 'Value (mg/L)': v} for k, v in self.influent_params.items()]
+            df_influent = pd.DataFrame(influent_data)
+
+            # Use ExcelWriter to save to specific sheets, preserving others
+            mode = 'a' if os.path.exists(output_path) else 'w'
+            with pd.ExcelWriter(output_path, engine='openpyxl', mode=mode, if_sheet_exists='replace') as writer:
+                df_satisfaction.to_excel(writer, sheet_name='optimal_satisfaction', index=False)
+                df_decision_vars.to_excel(writer, sheet_name='optimal_decision_variables', index=False)
+                df_capex.to_excel(writer, sheet_name='optimal_capex_breakdown', index=False)
+                df_aoc.to_excel(writer, sheet_name='optimal_aoc_breakdown', index=False)
+                df_effluent.to_excel(writer, sheet_name='optimal_predicted_effluent', index=False)
+                df_influent.to_excel(writer, sheet_name='default_influent_quality', index=False)
+            
             print("...Save successful.")
+
         except Exception as e:
             print(f"ERROR: Failed to save results to Excel. Reason: {e}", file=sys.stderr)
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
@@ -528,5 +585,4 @@ if __name__ == "__main__":
         print("Please ensure the configuration Excel file and surrogate model files are in the correct locations.", file=sys.stderr)
     except Exception as e:
         print(f"\nAN UNEXPECTED ERROR OCCURRED DURING EXECUTION: {e}", file=sys.stderr)
-        import traceback
         traceback.print_exc()

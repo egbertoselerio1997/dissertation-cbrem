@@ -27,7 +27,7 @@ def run_single_simulation(sim_id, input_df, vary_inputs, init_cond_df):
                 high = input_df.loc[var, 'max']
                 current_inputs[var] = np.random.uniform(low, high)
             else:
-                current_inputs[var] = input_df.loc[var, 'min']
+                current_inputs[var] = input_df.loc[var, 'baseline']
 
         # --- 2. Build the wastewater treatment system using the current inputs ---
         cmps = qs.processes.create_asm2d_cmps()
@@ -38,10 +38,17 @@ def run_single_simulation(sim_id, input_df, vary_inputs, init_cond_df):
         Q_inf = current_inputs['flow_rate']
         Q_was = current_inputs['Q_was']
         Q_ext = current_inputs['Q_ext']
-        V_an = current_inputs['V_an']
-        V_ae = current_inputs['V_ae']
-        KLa_aer1 = current_inputs['KLa_aer1']
-        KLa_aer2 = current_inputs['KLa_aer2']
+
+        V_A1 = current_inputs['V_A1']
+        V_A2 = current_inputs['V_A2']
+        V_O1 = current_inputs['V_O1']
+        V_O2 = current_inputs['V_O2']
+        V_O3 = current_inputs['V_O3']
+
+        KLa_O1 = current_inputs['KLa_O1']
+        KLa_O2 = current_inputs['KLa_O2']
+        KLa_O3 = current_inputs['KLa_O3']
+        
         O3_split_internal = current_inputs['O3_split_internal']
         C1_surface_area = current_inputs['C1_surface_area']
         C1_height = current_inputs['C1_height']
@@ -58,14 +65,15 @@ def run_single_simulation(sim_id, input_df, vary_inputs, init_cond_df):
         }
         influent.set_flow_by_concentration(Q_inf, concentrations=influent_concentrations, units=('m3/d', 'mg/L'))
 
-        aer1 = qs.processes.DiffusedAeration(f'aer1_{sim_id}', DO_ID='S_O2', KLa=KLa_aer1, DOsat=8.0, V=V_ae)
-        aer2 = qs.processes.DiffusedAeration(f'aer2_{sim_id}', DO_ID='S_O2', KLa=KLa_aer2, DOsat=8.0, V=V_ae)
+        aer_O1 = qs.processes.DiffusedAeration(f'aer_O1_{sim_id}', DO_ID='S_O2', KLa=KLa_O1, DOsat=8.0, V=V_O1)
+        aer_O2 = qs.processes.DiffusedAeration(f'aer_O2_{sim_id}', DO_ID='S_O2', KLa=KLa_O2, DOsat=8.0, V=V_O2)
+        aer_O3 = qs.processes.DiffusedAeration(f'aer_O3_{sim_id}', DO_ID='S_O2', KLa=KLa_O3, DOsat=8.0, V=V_O3)
 
-        A1 = qs.sanunits.CSTR(f'A1_{sim_id}', ins=[influent, int_recycle, ext_recycle], V_max=V_an, aeration=None, suspended_growth_model=asm2d_model)
-        A2 = qs.sanunits.CSTR(f'A2_{sim_id}', ins=A1-0, V_max=V_an, aeration=None, suspended_growth_model=asm2d_model)
-        O1 = qs.sanunits.CSTR(f'O1_{sim_id}', ins=A2-0, V_max=V_ae, aeration=aer1, DO_ID='S_O2', suspended_growth_model=asm2d_model)
-        O2 = qs.sanunits.CSTR(f'O2_{sim_id}', ins=O1-0, V_max=V_ae, aeration=aer1, DO_ID='S_O2', suspended_growth_model=asm2d_model)
-        O3 = qs.sanunits.CSTR(f'O3_{sim_id}', ins=O2-0, outs=[int_recycle, 'treated'], split=[O3_split_internal, 1 - O3_split_internal], V_max=V_ae, aeration=aer2, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        A1 = qs.sanunits.CSTR(f'A1_{sim_id}', ins=[influent, int_recycle, ext_recycle], V_max=V_A1, aeration=None, suspended_growth_model=asm2d_model)
+        A2 = qs.sanunits.CSTR(f'A2_{sim_id}', ins=A1-0, V_max=V_A2, aeration=None, suspended_growth_model=asm2d_model)
+        O1 = qs.sanunits.CSTR(f'O1_{sim_id}', ins=A2-0, V_max=V_O1, aeration=aer_O1, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        O2 = qs.sanunits.CSTR(f'O2_{sim_id}', ins=O1-0, V_max=V_O2, aeration=aer_O2, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        O3 = qs.sanunits.CSTR(f'O3_{sim_id}', ins=O2-0, outs=[int_recycle, 'treated'], split=[O3_split_internal, 1 - O3_split_internal], V_max=V_O3, aeration=aer_O3, DO_ID='S_O2', suspended_growth_model=asm2d_model)
         C1 = qs.sanunits.FlatBottomCircularClarifier(f'C1_{sim_id}', ins=O3-1, outs=[effluent, ext_recycle, wastage], underflow=Q_ext, wastage=Q_was, surface_area=C1_surface_area, height=C1_height, N_layer=10, feed_layer=5, X_threshold=3000, v_max=474, v_max_practical=250, rh=5.76e-4, rp=2.86e-3, fns=2.28e-3)
 
         sys = qs.System(f'sys_{sim_id}', path=(A1, A2, O1, O2, O3, C1), recycle=(int_recycle, ext_recycle))
@@ -183,6 +191,9 @@ def run_simulation():
             choice = input("Vary inputs randomly? (y/n): ").lower()
             if choice in ('y', 'n'):
                 vary_inputs = (choice == 'y')
+                if not vary_inputs:
+                    print("Baseline values will be used. The number of simulations will be set to 1.")
+                    num_simulations = 1
                 break
             print("Invalid choice. Please enter 'y' or 'n'.")
 
