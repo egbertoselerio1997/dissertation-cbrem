@@ -19,17 +19,18 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+process_unit = str(input("Enter process unit type ('clarifier' or 'cstr'): ")).lower().strip()
 
 # --- Configuration ---
 FILE_PATH = os.path.join('data', 'data.xlsx')
-OUTPUT_FILE_PATH = os.path.join('data', 'training_statistics.xlsx')
-MODEL_PATH = os.path.join('models', 'clefo_model.joblib')
+OUTPUT_FILE_PATH = os.path.join('data', 'training_stat_' + process_unit, process_unit + '_train_stat.xlsx')
+MODEL_PATH = os.path.join('models', process_unit, process_unit + '.joblib')
 TEST_SIZE = 0.1
 RANDOM_STATE = 42
 
 # --- PyTorch & Model Hyperparameters ---
-NUM_EPOCHS = 10000
-LEARNING_RATE = 0.0001
+NUM_EPOCHS = 2500
+LEARNING_RATE = 0.0005
 BATCH_SIZE = -1 # Use -1 for full-batch training
 LOG_INTERVAL = 100 # This is now only for potential future use, as tqdm will show live loss
 
@@ -45,20 +46,20 @@ else:
 def load_and_prepare_data(filepath: str):
     """
     Loads and preprocesses data from the specified Excel file.
-    Handles both long and wide formats for the 'consolidated_input' sheet.
+    Handles both long and wide formats for the 'all_input' sheet.
     """
     print("1. Loading and preparing data...")
-    df_input = pd.read_excel(filepath, sheet_name='consolidated_input_c1')
-    df_output = pd.read_excel(filepath, sheet_name='consolidated_output_c1')
+    df_input = pd.read_excel(filepath, sheet_name="all_input_" + process_unit)
+    df_output = pd.read_excel(filepath, sheet_name="all_output_" + process_unit)
 
     if {'variable', 'default'}.issubset(df_input.columns):
-        print("   - 'consolidated_input' is in long format. Pivoting data...")
+        print("   - 'all_input' is in long format. Pivoting data...")
         df_input_wide = df_input.pivot(
             index='simulation_number', columns='variable', values='default'
         ).reset_index()
         input_cols = df_input['variable'].unique().tolist()
     else:
-        print("   - 'consolidated_input' appears to be in wide format. Skipping pivot.")
+        print("   - 'all_input' appears to be in wide format. Skipping pivot.")
         df_input_wide = df_input
         input_cols = [col for col in df_input.columns if col != 'simulation_number']
 

@@ -47,17 +47,17 @@ def predict_analytical(X_scaled: np.ndarray, Z_scaled: np.ndarray, coeffs: dict)
     n_dep = Upsilon.shape[0]
     predictions = np.zeros((n_samples, n_dep))
     I = np.eye(n_dep)
-    
+
     for i in range(n_samples):
         x_sample = X_scaled[i].reshape(-1, 1)
         z_sample = Z_scaled[i].reshape(-1, 1)
-        
+
         RHS = Upsilon + (B @ x_sample) + (Theta @ z_sample)
-        
+
         lambda_x = Lambda @ x_sample
         diag_lambda_x = np.diag(lambda_x.flatten())
         LHS = I - Gamma - diag_lambda_x
-        
+
         try:
             y_pred_solved = np.linalg.solve(LHS, RHS)
             predictions[i, :] = y_pred_solved.flatten()
@@ -69,72 +69,86 @@ def predict_analytical(X_scaled: np.ndarray, Z_scaled: np.ndarray, coeffs: dict)
 def load_data_and_params():
     """
     Loads all model coefficients from the joblib file and all other parameters
-    from the Excel configuration file.
+    from the Excel configuration file based on the selected process unit.
     """
     print("1. Loading data and parameters from file...")
     params = {}
 
     config_path = os.path.join('data', 'optimization_config.xlsx')
-
     xls = pd.read_excel(config_path, sheet_name=None)
-    
-    df_config = xls['config'].set_index('Parameter')
-    model_path = df_config.loc['model_path', 'Value']
 
-    params['I'] = xls['decision_var']['I_variables'].tolist()
+    # --- Get and Validate User Input ---
+    input_process_unit = ""
+    while input_process_unit not in ['clarifier', 'cstr']:
+        input_process_unit = str(input("Enter process unit type ('clarifier', 'cstr', or 'a2o'): ")).lower().strip()
+        if input_process_unit not in ['clarifier', 'cstr']:
+            print("Invalid input. Please enter 'clarifier', 'cstr', or 'a2o'.")
+
+    # --- Filter DataFrames based on User Input ---
+    df_config = xls['config']
+    model_path_row = df_config[df_config['Process Unit'] == input_process_unit]
+    if model_path_row.empty:
+        raise ValueError(f"No model_path found for process unit '{input_process_unit}' in the 'config' worksheet.")
+    model_path = model_path_row['Value'].iloc[0]
+
+    df_decision_var = xls['decision_var']
+    filtered_decision_vars = df_decision_var[df_decision_var['Process Unit'].str.contains(input_process_unit, na=False)]
+    params['I'] = filtered_decision_vars['I_variables'].tolist()
 
     df_bounds = xls['decision_var_bound']
+    filtered_bounds = df_bounds[df_bounds['Process Unit'].str.contains(input_process_unit, na=False)]
     params['x_bounds'] = {
-        row.Variable: (row.LowerBound, row.UpperBound) 
-        for _, row in df_bounds.iterrows()
+        row.Variable: (row.LowerBound, row.UpperBound)
+        for _, row in filtered_bounds.iterrows()
     }
+    # --- End of Revised Section ---
 
     df_defaults = xls['influent_compound_conc']
     params['defaults'] = pd.Series(df_defaults.Value.values, index=df_defaults.Variable).to_dict()
 
     try:
-        params['df_cost_vars'] = xls['cost_var']
-        params['df_capex_calc'] = xls['capex_calc']
+        input_cost_var = "cost_var_" + input_process_unit
+        input_capex_calc = "capex_calc_" + input_process_unit
+        params['df_cost_vars'] = xls[input_cost_var]
+        params['df_capex_calc'] = xls[input_capex_calc]
     except KeyError as e:
         raise KeyError(f"Missing required cost sheet in '{config_path}': {e}. Please add 'cost_var' and 'capex_calc' worksheets.")
 
     cost_var_names = set(params['df_cost_vars']['Variable'].dropna())
     decision_var_names = set(params['I'])
     overlap = cost_var_names.intersection(decision_var_names)
-    
+
     if overlap:
-        print("\nINFO: The following variables are defined as both decision variables and cost parameters.")
+        print("\\nINFO: The following variables are defined as both decision variables and cost parameters.")
         print("      The decision variable bounds will be used for optimization, and the values in the")
         print("      'cost_var' sheet for these variables will be IGNORED.")
-        print(f"      Overlapping variables: {', '.join(sorted(list(overlap)))}\n")
+        print(f"      Overlapping variables: {', '.join(sorted(list(overlap)))}\\n")
 
     df_goals = xls['fuzzy_goal']
-    
-    # --- CRITICAL FIX: Clean the goal names at the point of creation ---
+
     params['fuzzy_goals'] = {
-        row.Goal.split(' (')[0].strip(): {'target': row.Target, 'max': row.Max} 
+        row.Goal.split(' (')[0].strip(): {'target': row.Target, 'max': row.Max}
         for _, row in df_goals.iterrows()
     }
-    # --- END CRITICAL FIX ---
-    
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(
             f"Model file not found at '{model_path}'. "
-            f"Please ensure the path in '{config_path}' is correct."
+            f"Please ensure the path in '{config_path}' is correct for the selected process unit."
         )
 
     model_bundle = joblib.load(model_path)
-    
+
     params['coeffs'] = {k: v for k, v in model_bundle.items() if k not in ['model', 'x_scaler', 'y_scaler']}
     params['x_scaler'] = model_bundle['x_scaler']
     params['y_scaler'] = model_bundle['y_scaler']
 
     raw_m_names = list(params['x_scaler'].feature_names_in_)
     params['M'] = [name.split(' (')[0].strip() for name in raw_m_names]
-    
+
     raw_k_names = list(params['y_scaler'].feature_names_in_)
     params['K'] = [name.split(' (')[0].strip() for name in raw_k_names]
-    
+
     params['J'] = [v for v in params['M'] if v not in params['I']]
     params['L'] = list(itertools.combinations(params['M'], 2))
 
@@ -143,9 +157,8 @@ def load_data_and_params():
     params['scaled_fuzzy_goals'] = {}
     y_scaler = params['y_scaler']
     for goal, limits in params['fuzzy_goals'].items():
-        if goal.startswith('Target_Effluent_'): # Using a more specific prefix
+        if goal.startswith('Target_Effluent_'):
             try:
-                # This will now succeed because 'goal' is a cleaned name
                 idx = params['K'].index(goal)
                 scaled_target = (limits['target'] - y_scaler.mean_[idx]) / y_scaler.scale_[idx]
                 scaled_max = (limits['max'] - y_scaler.mean_[idx]) / y_scaler.scale_[idx]
@@ -154,7 +167,7 @@ def load_data_and_params():
                 print(f"Warning: Fuzzy goal '{goal}' not found in model outputs. Skipping.")
                 pass
 
-    print("...Data loading complete.")
+    print(f"...Data loading for '{input_process_unit}' complete.")
     return params
 
 def build_cost_model(model, params):
@@ -163,7 +176,7 @@ def build_cost_model(model, params):
     Gives precedence to decision variables over fixed cost parameters.
     """
     print("2a. Building cost model from 'cost_var' and 'capex_calc' sheets...")
-    
+
     cost_context = {}
 
     for i in model.I:
@@ -179,12 +192,12 @@ def build_cost_model(model, params):
         cost_context[var_name] = param
 
     df_capex_calc = params['df_capex_calc'].dropna(subset=['Output Variable', 'Calculation'])
-    
+
     model.cost_calc_order = df_capex_calc['Output Variable'].tolist()
-    
+
     for _, row in df_capex_calc.iterrows():
         var_name = row['Output Variable']
-        var = pyo.Var(within=pyo.NonNegativeReals, initialize=0)
+        var = pyo.Var(within=pyo.Reals, initialize=0)
         setattr(model, var_name, var)
         cost_context[var_name] = var
 
@@ -218,15 +231,15 @@ def build_nlp_model(params):
     l_map = {name: i for i, name in enumerate(params['L'])}
 
     model.x = pyo.Var(model.I, bounds=lambda m, i: params['x_bounds'][i], initialize=lambda m, i: np.mean(params['x_bounds'][i]))
-    
+
     model.lambda_g = pyo.Var(model.G, initialize=0.5)
     model.lambda_o = pyo.Var(initialize=0.5)
-    
+
     model.X = pyo.Var(model.M)
     model.X_s = pyo.Var(model.M)
     model.Y = pyo.Var(model.K, within=pyo.NonNegativeReals)
     model.Y_s = pyo.Var(model.K)
-    
+
     model = build_cost_model(model, params)
     if not hasattr(model, 'CAPEX'): model.CAPEX = pyo.Var(initialize=0)
     if not hasattr(model, 'AOC'): model.AOC = pyo.Var(initialize=0)
@@ -298,7 +311,7 @@ def build_nlp_model(params):
         model.FuzzyConstraints.add(
             model.lambda_g['CAPEX'] == 1 - (x_capex - x_min_capex) / (denominator_capex + epsilon)
         )
-    
+
     print("...NLP model build complete.")
     return model
 
@@ -313,29 +326,29 @@ def solve_and_display_results(model, params):
         return
 
     results = solver.solve(model, tee=True)
-    
-    print("\n" + "="*80)
+
+    print("\\n" + "="*80)
     print("OPTIMIZATION RESULTS REPORT".center(80))
     print("="*80)
-    
+
     term_cond = results.solver.termination_condition
     print(f"Solver Status: {term_cond}")
 
     if term_cond in [pyo.TerminationCondition.optimal, pyo.TerminationCondition.locallyOptimal]:
-        print("\n---> Optimal Solution Found <---\n")
+        print("\\n---> Optimal Solution Found <---\\n")
         lambda_o_val = pyo.value(model.lambda_o)
         print(f"Overall Satisfaction Level (lambda_o): {lambda_o_val:.4f}")
 
-        print("\n--- Individual Goal Satisfaction (lambda_g) ---")
+        print("\\n--- Individual Goal Satisfaction (lambda_g) ---")
         for g in sorted(model.G):
             print(f"{g:<20}: {pyo.value(model.lambda_g[g]):.4f}")
-        
-        print("\n--- Optimal Decision Variables ---")
+
+        print("\\n--- Optimal Decision Variables ---")
         for i in model.I:
             print(f"{i:<12}: {pyo.value(model.x[i]):10.2f} (Bounds: {params['x_bounds'][i]})")
 
         df_capex_calc = params['df_capex_calc'].dropna(subset=['Output Variable', 'Calculation'])
-        
+
         capex = pyo.value(model.CAPEX) if hasattr(model, 'CAPEX') else 0
         aoc = pyo.value(model.AOC) if hasattr(model, 'AOC') else 0
         capex_goal = params['fuzzy_goals'].get('CAPEX', {'target': 0, 'max': 1})
@@ -343,7 +356,7 @@ def solve_and_display_results(model, params):
         capex_satisfaction = pyo.value(model.lambda_g['CAPEX']) if 'CAPEX' in model.G else 'N/A'
         aoc_satisfaction = pyo.value(model.lambda_g['AOC']) if 'AOC' in model.G else 'N/A'
 
-        print("\n--- CAPEX Breakdown ---")
+        print("\\n--- CAPEX Breakdown ---")
         for var_name in model.cost_calc_order:
              if any(keyword in var_name for keyword in ['CAPEX', 'purch', 'V_reactor', 'C_const', 'C_equip']):
                 val = pyo.value(getattr(model, var_name))
@@ -352,7 +365,7 @@ def solve_and_display_results(model, params):
         print("-" * 50)
         print(f"{'Total CAPEX':<35}: ${capex:12,.2f} (Target: ${capex_goal['target']:,.0f}, Max: ${capex_goal['max']:,.0f}, Satisfaction: {capex_satisfaction:.3f})")
 
-        print("\n--- AOC Breakdown ---")
+        print("\\n--- AOC Breakdown ---")
         for var_name in model.cost_calc_order:
             if any(keyword in var_name for keyword in ['AOC', 'cost', 'power']):
                  val = pyo.value(getattr(model, var_name))
@@ -361,7 +374,7 @@ def solve_and_display_results(model, params):
         print("-" * 50)
         print(f"{'Total AOC':<35}: ${aoc:12,.2f} / yr (Target: ${aoc_goal['target']:,.0f}, Max: ${aoc_goal['max']:,.0f}, Satisfaction: {aoc_satisfaction:.3f})")
 
-        print("\n--- All Predicted Effluent Quality (mg/L) ---")
+        print("\\n--- All Predicted Effluent Quality (mg/L) ---")
         for k in sorted(model.K):
             val = pyo.value(model.Y[k])
             if k in params['fuzzy_goals']:
@@ -370,8 +383,8 @@ def solve_and_display_results(model, params):
                 print(f"{k:<20}: {val:8.3f} (Target: {goal['target']:<4.1f}, Max: {goal['max']:<4.1f}, Satisfaction: {satisfaction:.3f})")
             else:
                 print(f"{k:<20}: {val:8.3f} (Not a primary goal)")
-        
-        print("\n--- Saving results to data/data.xlsx ---")
+
+        print("\\n--- Saving results to data/data.xlsx ---")
         try:
             output_folder = 'data'
             output_filename = 'data.xlsx'
@@ -386,13 +399,13 @@ def solve_and_display_results(model, params):
 
             dec_vars_data = [{'Variable': i, 'Optimal Value': pyo.value(model.x[i]), 'notes': f"Bounds: {params['x_bounds'][i]}"} for i in model.I]
             df_decision_vars = pd.DataFrame(dec_vars_data)
-            
+
             capex_data = [{'Component': df_capex_calc[df_capex_calc['Output Variable'] == v]['Description'].iloc[0], 'Value': pyo.value(getattr(model, v)), 'Unit': '$'} for v in model.cost_calc_order if any(k in v for k in ['CAPEX', 'purch', 'C_const', 'C_equip'])]
             df_capex = pd.DataFrame(capex_data)
 
             aoc_data = [{'Component': df_capex_calc[df_capex_calc['Output Variable'] == v]['Description'].iloc[0], 'Value': pyo.value(getattr(model, v)), 'Unit': '$/yr'} for v in model.cost_calc_order if any(k in v for k in ['AOC', 'cost', 'power'])]
             df_aoc = pd.DataFrame(aoc_data)
-            
+
             effluent_data = []
             for k in sorted(model.K):
                 val = pyo.value(model.Y[k])
@@ -403,7 +416,7 @@ def solve_and_display_results(model, params):
                     note = f"Target: {goal['target']:.1f}, Max: {goal['max']:.1f}, Satisfaction: {satisfaction:.3f}"
                 effluent_data.append({'Component': k, 'Predicted Value (mg/L)': val, 'Notes': note})
             df_effluent = pd.DataFrame(effluent_data)
-            
+
             df_influent = pd.DataFrame(list(params['defaults'].items()), columns=['Variable', 'Value (mg/L)'])
 
             mode = 'a' if os.path.exists(output_path) else 'w'
@@ -416,9 +429,9 @@ def solve_and_display_results(model, params):
                 df_influent.to_excel(writer, sheet_name='default_influent_quality', index=False)
             print(f"...Successfully saved results to '{output_path}'.")
         except Exception as e:
-            print(f"\nERROR: Failed to save results to Excel file. Reason: {e}", file=sys.stderr)
-        
-        print("\n" + "="*80)
+            print(f"\\nERROR: Failed to save results to Excel file. Reason: {e}", file=sys.stderr)
+
+        print("\\n" + "="*80)
         print("VERIFICATION: PYOMO vs. ANALYTICAL RECONSTRUCTION".center(80))
         print("="*80)
         m_order = params['M']
@@ -442,7 +455,7 @@ def solve_and_display_results(model, params):
             print("Conclusion: A significant discrepancy exists. The Pyomo model reconstruction is incorrect.")
 
     else:
-        print("\n---> No optimal solution found. <---")
+        print("\\n---> No optimal solution found. <---")
         print("This could be due to an infeasible problem formulation or solver issues.")
     print("="*80)
 
@@ -455,10 +468,10 @@ def main():
         model = build_nlp_model(params)
         solve_and_display_results(model, params)
     except Exception as e:
-        print(f"\nAN ERROR OCCURRED: {e}", file=sys.stderr)
+        print(f"\\nAN ERROR OCCURRED: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
 
 if __name__ == "__main__":
-    os.environ["PATH"] = os.environ["PATH"] + ";C:\\Users\\eggy\\miniforge3\\Library\\bin"
+    os.environ["PATH"] = os.environ["PATH"] + ";C:\\\\Users\\\\eggy\\\\miniforge3\\\\Library\\\\bin"
     main()
