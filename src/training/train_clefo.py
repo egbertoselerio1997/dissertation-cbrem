@@ -29,7 +29,7 @@ TEST_SIZE = 0.1
 RANDOM_STATE = 42
 
 # --- PyTorch & Model Hyperparameters ---
-NUM_EPOCHS = 2500
+NUM_EPOCHS = 5000
 LEARNING_RATE = 0.0005
 BATCH_SIZE = -1 # Use -1 for full-batch training
 LOG_INTERVAL = 100 # This is now only for potential future use, as tqdm will show live loss

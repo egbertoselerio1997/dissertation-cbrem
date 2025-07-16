@@ -237,7 +237,7 @@ def build_nlp_model(params):
 
     model.X = pyo.Var(model.M)
     model.X_s = pyo.Var(model.M)
-    model.Y = pyo.Var(model.K, within=pyo.NonNegativeReals)
+    model.Y = pyo.Var(model.K, within=pyo.Reals)
     model.Y_s = pyo.Var(model.K)
 
     model = build_cost_model(model, params)
