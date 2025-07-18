@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 def load_simple_inputs(filepath: str):
     """
-    Loads inputs for simple models (CSTR, Clarifier) from the specified Excel file.
+    Loads inputs for simple models (CSTR, Clarifier) from the specified optimization results file.
     """
     print(f"1. Loading inputs for simple model from '{filepath}'...")
     if not os.path.exists(filepath):
@@ -26,7 +26,21 @@ def load_simple_inputs(filepath: str):
         xls = pd.read_excel(filepath, sheet_name=None)
         
         df_dec_vars = xls['optimal_decision_variables']
-        decision_inputs = df_dec_vars.set_index('Variable')['Optimal Value'].to_dict()
+        decision_inputs = {}
+        # Handle unit-specific variables to create unique keys (e.g., 'KLa_O1')
+        for _, row in df_dec_vars.iterrows():
+            variable = row['Variable']
+            unit = row['Process Unit']
+            value = row['Optimal Value']
+            if variable in ['KLa', 'V']:
+                key = f"{variable}_{unit}"
+            else:
+                key = variable
+            decision_inputs[key] = value
+
+        # Rename Q_raw_inf to flow_rate for compatibility with simulation functions
+        if 'Q_raw_inf' in decision_inputs:
+            decision_inputs['flow_rate'] = decision_inputs.pop('Q_raw_inf')
         print("   - Loaded optimal decision variables.")
         
         df_influent = xls['default_influent_quality']
@@ -42,18 +56,24 @@ def load_simple_inputs(filepath: str):
     except KeyError as e:
         raise KeyError(f"A required sheet {e} was not found in '{filepath}'.")
 
-def load_aao_inputs(filepath: str):
+def load_aao_inputs(optimization_filepath: str, initial_cond_filepath: str):
     """
-    Loads inputs specifically for the AAO WWTP model, handling composite keys.
+    Loads inputs specifically for the AAO WWTP model from separate files.
     """
-    print(f"1. Loading inputs for AAO model from '{filepath}'...")
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(f"The file was not found at '{filepath}'.")
+    print(f"1. Loading inputs for AAO model...")
+    print(f"   - Loading optimization results from '{optimization_filepath}'")
+    if not os.path.exists(optimization_filepath):
+        raise FileNotFoundError(f"The optimization results file was not found at '{optimization_filepath}'.")
+
+    print(f"   - Loading initial conditions from '{initial_cond_filepath}'")
+    if not os.path.exists(initial_cond_filepath):
+        raise FileNotFoundError(f"The initial conditions file was not found at '{initial_cond_filepath}'.")
 
     try:
-        xls = pd.read_excel(filepath, sheet_name=None)
+        # Load data from the optimization results file
+        xls_opt = pd.read_excel(optimization_filepath, sheet_name=None)
         
-        df_dec_vars = xls['optimal_decision_variables']
+        df_dec_vars = xls_opt['optimal_decision_variables']
         decision_inputs = {}
         generic_vars_needing_unit = ['KLa', 'V']
 
@@ -67,28 +87,34 @@ def load_aao_inputs(filepath: str):
             else:
                 key = variable
             decision_inputs[key] = value
+
+        # Rename Q_raw_inf to flow_rate for compatibility with simulation functions
+        if 'Q_raw_inf' in decision_inputs:
+            decision_inputs['flow_rate'] = decision_inputs.pop('Q_raw_inf')
         print("   - Loaded optimal decision variables.")
 
-        df_influent = xls['default_influent_quality']
+        df_influent = xls_opt['default_influent_quality']
         influent_inputs = {f"inf_{k}": v for k, v in df_influent.set_index('Variable')['Value (mg/L)'].to_dict().items()}
         print("   - Loaded default influent concentrations.")
 
-        df_predicted_effluent = xls['optimal_predicted_effluent']
+        df_predicted_effluent = xls_opt['optimal_predicted_effluent']
         print("   - Loaded predicted effluent quality for validation.")
 
+        # Load initial conditions from the separate data file
         try:
-            init_cond_df = xls['initial_conditions']
-            init_cond_df = init_cond_df.set_index(init_cond_df.columns[0])
+            xls_init = pd.read_excel(initial_cond_filepath, sheet_name='initial_conditions')
+            init_cond_df = xls_init.set_index(xls_init.columns[0])
             print("   - Loaded initial conditions.")
-        except KeyError:
+        except (KeyError, FileNotFoundError):
             init_cond_df = None
-            print("   - WARNING: 'initial_conditions' sheet not found. Simulation may fail.")
+            print("   - WARNING: 'initial_conditions' sheet not found in the initial conditions file. Simulation may fail.")
 
         all_inputs = {**decision_inputs, **influent_inputs}
         return all_inputs, df_predicted_effluent, init_cond_df
 
     except KeyError as e:
-        raise KeyError(f"A required sheet {e} was not found in '{filepath}'.")
+        raise KeyError(f"A required sheet {e} was not found in '{optimization_filepath}'.")
+
 
 def _get_simulated_composites(stream):
     """
@@ -96,12 +122,12 @@ def _get_simulated_composites(stream):
     to its final state from the dynamic simulation, then calling the built-in
     properties and methods.
     """
-    if stream.state is None or stream.state[-1] <= 0:
+    if stream.state is None or stream.F_mass <= 0:
         return {'BOD': 0, 'COD': 0, 'TN': 0, 'TKN': 0, 'TP': 0, 'TSS': 0, 'VSS': 0}
 
-    final_flow_m3d = stream.state[-1]
-    stream.set_total_flow(final_flow_m3d, 'm3/d')
-
+    # Ensure stream state is updated for composite property calculations
+    stream.state
+    
     return {
         'BOD': stream.BOD,
         'COD': stream.COD,
@@ -125,11 +151,12 @@ def run_single_cstr_simulation(inputs: dict):
             flow_tot=inputs['flow_rate'], concentrations=influent_concentrations, units=('m3/d', 'mg/L')
         )
         asm2d_model = qs.processes.ASM2d()
+        # Assuming the CSTR being tested is O1 for validation purposes
         aeration_process = qs.processes.DiffusedAeration(
-            ID='O1_aeration', DO_ID='S_O2', KLa=inputs['KLa'], DOsat=8.0, V=inputs['V']
+            ID='O1_aeration', DO_ID='S_O2', KLa=inputs['KLa_O1'], DOsat=8.0, V=inputs['V_O1']
         )
         o1_reactor = qs.sanunits.CSTR(
-            ID='O1_validation', ins=ws.copy(), V_max=inputs['V'], aeration=aeration_process,
+            ID='O1_validation', ins=ws.copy(), V_max=inputs['V_O1'], aeration=aeration_process,
             suspended_growth_model=asm2d_model, DO_ID='S_O2'
         )
         sys = qs.System('sys_validation', path=(o1_reactor,))
@@ -194,7 +221,7 @@ def run_single_clarifier_simulation(inputs: dict):
         qs.main_flowsheet.clear()
     return simulated_results
 
-def run_full_aao_wwtp_simulation(inputs: dict, init_cond_df: pd.DataFrame = None):
+def run_full_aao_simulation(inputs: dict, init_cond_df: pd.DataFrame = None):
     print("\n2. Setting up and running the full A2/O WWTP validation simulation...")
     simulated_results = {}
     try:
@@ -204,7 +231,7 @@ def run_full_aao_wwtp_simulation(inputs: dict, init_cond_df: pd.DataFrame = None
         asm2d_model = qs.processes.ASM2d()
         Temp = 273.15 + 20
 
-        # --- 2. Create all streams ---
+        # --- 2. Extract operational parameters and create streams ---
         Q_inf = inputs['flow_rate']
         Q_was = inputs['Q_was']
         Q_ext = inputs['Q_ext']
@@ -220,32 +247,29 @@ def run_full_aao_wwtp_simulation(inputs: dict, init_cond_df: pd.DataFrame = None
         influent.set_flow_by_concentration(Q_inf, concentrations=influent_concentrations, units=('m3/d', 'mg/L'))
 
         # --- 3. Build the WWTP topology with correct connections ---
-        aer1 = qs.processes.DiffusedAeration('aer1_validation', DO_ID='S_O2', KLa=inputs['KLa_O1'], DOsat=8.0, V=inputs['V_O1'])
-        aer2 = qs.processes.DiffusedAeration('aer2_validation', DO_ID='S_O2', KLa=inputs['KLa_O2'], DOsat=8.0, V=inputs['V_O2'])
-        aer3 = qs.processes.DiffusedAeration('aer3_validation', DO_ID='S_O2', KLa=inputs['KLa_O3'], DOsat=8.0, V=inputs['V_O3'])
+        aer_A1 = qs.processes.DiffusedAeration('aer_A1_validation', DO_ID='S_O2', KLa=inputs['KLa_A1'], DOsat=8.0, V=inputs['V_A1'])
+        aer_A2 = qs.processes.DiffusedAeration('aer_A2_validation', DO_ID='S_O2', KLa=inputs['KLa_A2'], DOsat=8.0, V=inputs['V_A2'])
+        aer_O1 = qs.processes.DiffusedAeration('aer_O1_validation', DO_ID='S_O2', KLa=inputs['KLa_O1'], DOsat=8.0, V=inputs['V_O1'])
+        aer_O2 = qs.processes.DiffusedAeration('aer_O2_validation', DO_ID='S_O2', KLa=inputs['KLa_O2'], DOsat=8.0, V=inputs['V_O2'])
+        aer_O3 = qs.processes.DiffusedAeration('aer_O3_validation', DO_ID='S_O2', KLa=inputs['KLa_O3'], DOsat=8.0, V=inputs['V_O3'])
         
-        # KEY FIX: Define all inputs to A1 at initialization
-        A1 = qs.sanunits.CSTR('A1_validation', ins=[influent, int_recycle, ext_recycle], V_max=inputs['V_A1'], suspended_growth_model=asm2d_model)
-        A2 = qs.sanunits.CSTR('A2_validation', ins=A1-0, V_max=inputs['V_A2'], suspended_growth_model=asm2d_model)
-        O1 = qs.sanunits.CSTR('O1_validation', ins=A2-0, V_max=inputs['V_O1'], aeration=aer1, DO_ID='S_O2', suspended_growth_model=asm2d_model)
-        O2 = qs.sanunits.CSTR('O2_validation', ins=O1-0, V_max=inputs['V_O2'], aeration=aer2, DO_ID='S_O2', suspended_growth_model=asm2d_model)
-        
-        # KEY FIX: Define the split outlet stream from O3 correctly
-        O3 = qs.sanunits.CSTR('O3_validation', ins=O2-0, outs=[int_recycle, 'to_clarifier'], split=[O3_split_internal, 1 - O3_split_internal], V_max=inputs['V_O3'], aeration=aer3, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        A1 = qs.sanunits.CSTR('A1_validation', ins=[influent, int_recycle, ext_recycle], V_max=inputs['V_A1'], aeration=aer_A1, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        A2 = qs.sanunits.CSTR('A2_validation', ins=A1-0, V_max=inputs['V_A2'], aeration=aer_A2, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        O1 = qs.sanunits.CSTR('O1_validation', ins=A2-0, V_max=inputs['V_O1'], aeration=aer_O1, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        O2 = qs.sanunits.CSTR('O2_validation', ins=O1-0, V_max=inputs['V_O2'], aeration=aer_O2, DO_ID='S_O2', suspended_growth_model=asm2d_model)
+        O3 = qs.sanunits.CSTR('O3_validation', ins=O2-0, outs=[int_recycle, 'treated'], split=[O3_split_internal, 1 - O3_split_internal], V_max=inputs['V_O3'], aeration=aer_O3, DO_ID='S_O2', suspended_growth_model=asm2d_model)
         
         C1 = qs.sanunits.FlatBottomCircularClarifier(
             'C1_validation', ins=O3-1, outs=[effluent, ext_recycle, wastage],
             surface_area=inputs['C1_surface_area'], height=inputs['C1_height'],
-            underflow=Q_ext, wastage=Q_was, N_layer=10, feed_layer=5
+            underflow=Q_ext, wastage=Q_was
         )
 
-        # KEY FIX: Define the system with correct recycle streams
         sys = qs.System('sys_validation', path=(A1, A2, O1, O2, O3, C1), recycle=(int_recycle, ext_recycle))
 
         # --- 4. Set initial conditions ---
         if init_cond_df is not None:
             print("   - Applying initial conditions...")
-            # ... (initial condition logic is correct)
             def batch_init_static(system_obj, dataframe_with_init_cond):
                 dct = dataframe_with_init_cond.to_dict('index')
                 u = system_obj.flowsheet.unit
@@ -269,9 +293,13 @@ def run_full_aao_wwtp_simulation(inputs: dict, init_cond_df: pd.DataFrame = None
         
         # --- 6. Collect results from all relevant streams ---
         streams_to_report = {
-            'A1_eff': A1.outs[0], 'A2_eff': A2.outs[0], 'O1_eff': O1.outs[0],
-            'O2_eff': O2.outs[0], 'O3_eff': O3.outs[0], 'Effluent': C1.outs[0],
-            'Wastage': C1.outs[2], 'Int_Recycle': int_recycle, 'Ext_Recycle': ext_recycle,
+            'A1_eff': A1.outs[0],
+            'A2_eff': A2.outs[0],
+            'O1_eff': O1.outs[0],
+            'O2_eff': O2.outs[0],
+            'O3_eff': O3.outs[1], # Corrected outlet: stream to clarifier
+            'Effluent': C1.outs[0],
+            'Wastage': C1.outs[2],
         }
         for prefix, stream in streams_to_report.items():
             for idx, comp_id in enumerate(stream.components.IDs):
@@ -296,30 +324,32 @@ def display_comparison_report(predicted_df: pd.DataFrame, simulated_dict: dict):
     comparison_data = []
 
     for _, row in predicted_df.iterrows():
-        pred_key = row['Component'] # e.g., "BOD_A1" or "S_A_C1"
+        pred_key = row['Component']
+        sim_key = None
         
-        # KEY FIX: Parse the prediction key and build the simulation key
-        parts = pred_key.split('_')
-        unit_id = parts[-1]
-        prop_id = '_'.join(parts[:-1])
-
-        if unit_id == 'C1':
-            # Map "C1" from predictions to "Effluent" from simulation results
+        # Parse the prediction key to build the corresponding simulation key
+        if pred_key.endswith('_Effluent'):
+            prop_id = pred_key.replace('_Effluent', '')
             sim_key = f"Effluent_{prop_id}"
-        elif unit_id == 'Wastage':
-            # Wastage stream name matches directly
+        elif pred_key.endswith('_Wastage'):
+            prop_id = pred_key.replace('_Wastage', '')
             sim_key = f"Wastage_{prop_id}"
-        else:
-            # Reactor effluents are "<unit_id>_eff_<property>"
-            sim_key = f"{unit_id}_eff_{prop_id}"
-        
-        if sim_key in simulated_dict:
+        else: # Assumes reactor unit (e.g., S_A_A1)
+            try:
+                parts = pred_key.split('_')
+                unit_id = parts[-1]
+                prop_id = '_'.join(parts[:-1])
+                sim_key = f"{unit_id}_eff_{prop_id}"
+            except IndexError:
+                continue
+
+        if sim_key and sim_key in simulated_dict:
             predicted_val = row['Predicted Value (mg/L)']
             simulated_val = simulated_dict[sim_key]
             difference = simulated_val - predicted_val
             relative_diff = (difference / predicted_val * 100) if abs(predicted_val) > 1e-6 else np.nan
             comparison_data.append({
-                'Component': pred_key, # Display original name from file
+                'Component': pred_key,
                 'Predicted (Surrogate) mg/L': predicted_val,
                 'Simulated (QSDsan) mg/L': simulated_val,
                 'Absolute Difference': difference,
@@ -348,7 +378,7 @@ def display_comparison_report(predicted_df: pd.DataFrame, simulated_dict: dict):
         print("\nConclusion: Moderate to poor agreement. The surrogate model shows some deviation.")
 
 def run_cstr_validation():
-    data_filepath = os.path.join('data', 'data.xlsx')
+    data_filepath = os.path.join('data', 'optimization_results.xlsx')
     try:
         optimal_inputs, predicted_df = load_simple_inputs(data_filepath)
         simulated_concs = run_single_cstr_simulation(optimal_inputs)
@@ -358,7 +388,7 @@ def run_cstr_validation():
         print(f"\nVALIDATION FAILED: {e}")
 
 def run_clarifier_validation():
-    data_filepath = os.path.join('data', 'data.xlsx')
+    data_filepath = os.path.join('data', 'optimization_results.xlsx')
     try:
         optimal_inputs, predicted_df = load_simple_inputs(data_filepath)
         simulated_results = run_single_clarifier_simulation(optimal_inputs)
@@ -367,11 +397,14 @@ def run_clarifier_validation():
     except (FileNotFoundError, KeyError) as e:
         print(f"\nVALIDATION FAILED: {e}")
 
-def run_aao_wwtp_validation():
-    data_filepath = os.path.join('data', 'data.xlsx')
+def run_aao_validation():
+    optimization_filepath = os.path.join('data', 'optimization_results.xlsx')
+    initial_cond_filepath = os.path.join('data', 'data.xlsx')
     try:
-        optimal_inputs, predicted_df, init_cond_df = load_aao_inputs(data_filepath)
-        simulated_results = run_full_aao_wwtp_simulation(optimal_inputs, init_cond_df)
+        optimal_inputs, predicted_df, init_cond_df = load_aao_inputs(
+            optimization_filepath, initial_cond_filepath
+        )
+        simulated_results = run_full_aao_simulation(optimal_inputs, init_cond_df)
         if simulated_results:
             display_comparison_report(predicted_df, simulated_results)
     except (FileNotFoundError, KeyError) as e:
@@ -389,7 +422,7 @@ def main():
             "Which model would you like to validate?\n"
             "1. cstr\n"
             "2. clarifier\n"
-            "3. aao_wwtp\n"
+            "3. aao\n"
             "Enter your choice: "
         ).lower().strip()
         
@@ -399,11 +432,11 @@ def main():
         elif choice in ['2', 'clarifier']:
             run_clarifier_validation()
             break
-        elif choice in ['3', 'aao_wwtp']:
-            run_aao_wwtp_validation()
+        elif choice in ['3', 'aao']:
+            run_aao_validation()
             break
         else:
-            print("\nInvalid choice. Please enter 'cstr', 'clarifier', or 'aao_wwtp' (or 1, 2, 3).")
+            print("\nInvalid choice. Please enter 'cstr', 'clarifier', or 'aao' (or 1, 2, 3).")
 
 if __name__ == '__main__':
     main()

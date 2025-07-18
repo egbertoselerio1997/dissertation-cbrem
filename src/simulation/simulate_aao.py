@@ -20,12 +20,26 @@ def run_single_simulation(sim_id, input_df, vary_inputs, init_cond_df):
     try:
         # --- 1. Get the inputs for the current simulation run ---
         current_inputs = {'simulation_number': sim_id}
-        for var in input_df.index:
+
+        # If inputs are varied, set up a master seed sequence for this simulation run.
+        # This allows each random variable within this single simulation to be generated
+        # from its own independent, randomly-generated seed.
+        if vary_inputs:
+            # A master seed sequence is created using OS-provided entropy for randomness.
+            master_seed_seq = np.random.SeedSequence()
+            # Spawn a separate, independent seed sequence for each potential variable.
+            child_seeds = master_seed_seq.spawn(len(input_df.index))
+
+        for i, var in enumerate(input_df.index):
             is_randomizable = input_df.loc[var, 'randomizable'] == 1
             if vary_inputs and is_randomizable:
+                # Create a dedicated random number generator for this specific variable
+                # using its unique, pre-spawned seed.
+                rng = np.random.default_rng(child_seeds[i])
+                
                 low = input_df.loc[var, 'min']
                 high = input_df.loc[var, 'max']
-                current_inputs[var] = np.random.uniform(low, high)
+                current_inputs[var] = rng.uniform(low, high)
             else:
                 current_inputs[var] = input_df.loc[var, 'baseline']
 
@@ -133,7 +147,8 @@ def run_single_simulation(sim_id, input_df, vary_inputs, init_cond_df):
         }
         
         all_inf_components = [c for c in cmps.IDs if c not in ['H2O']]
-        all_out_components = list(all_inf_components) + ['COD','BOD','TN','TKN','TP','TSS','VSS','X_MeOH','X_MeP','H2O']
+        composite_properties = ['COD', 'BOD', 'TN', 'TKN', 'TP', 'TSS', 'VSS']
+        all_out_components = list(all_inf_components) + composite_properties + ['X_MeOH','X_MeP','H2O']
 
         for _, details in units_to_process.items():
             in_data = stream_results.get(details['in_stream_key'])
@@ -146,6 +161,8 @@ def run_single_simulation(sim_id, input_df, vary_inputs, init_cond_df):
             }
             for comp_id in all_inf_components:
                 input_row[f'inf_{comp_id}'] = in_data.get(comp_id, 0)
+            for prop in composite_properties:
+                input_row[f'inf_{prop}'] = in_data.get(prop, 0)
             cstr_input_rows.append(input_row)
             
             output_row = {'simulation_number': sim_id}
@@ -165,6 +182,8 @@ def run_single_simulation(sim_id, input_df, vary_inputs, init_cond_df):
             }
             for comp_id in all_inf_components:
                 clarifier_input_row[f'inf_{comp_id}'] = c1_in_data.get(comp_id, 0)
+            for prop in composite_properties:
+                clarifier_input_row[f'inf_{prop}'] = c1_in_data.get(prop, 0)
             
             clarifier_output_row = {'simulation_number': sim_id}
             for comp in all_out_components:
@@ -294,7 +313,9 @@ def run_simulation():
     
     # --- Define final column order based on user request ---
     inf_cols = ['inf_S_I', 'inf_X_I', 'inf_S_F', 'inf_S_A', 'inf_X_S', 'inf_S_NH4', 'inf_S_O2', 'inf_S_N2', 'inf_S_NO3', 'inf_S_PO4', 'inf_X_PP', 'inf_X_PHA', 'inf_X_H', 'inf_X_AUT', 'inf_X_PAO', 'inf_S_ALK', 'inf_X_MeOH', 'inf_X_MeP']
-    inf_cols.sort() # Sort alphabetically to ensure consistent order
+    composite_cols = ['inf_COD', 'inf_BOD', 'inf_TN', 'inf_TKN', 'inf_TP', 'inf_TSS', 'inf_VSS']
+    inf_cols.extend(composite_cols)
+    inf_cols.sort()
 
     final_cstr_cols = ['simulation_number', 'Q_raw_inf', 'Q_int', 'Q_was', 'Q_ext', 'V', 'KLa'] + inf_cols
     final_clarifier_cols = ['simulation_number', 'Q_raw_inf', 'C1_surface_area', 'C1_height', 'Q_int', 'Q_was', 'Q_ext'] + inf_cols

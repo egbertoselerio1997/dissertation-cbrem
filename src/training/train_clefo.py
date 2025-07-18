@@ -19,7 +19,17 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
-process_unit = str(input("Enter process unit type ('clarifier' or 'cstr'): ")).lower().strip()
+
+# --- REVISED: Improved user input with validation for all options ---
+valid_units = ['clarifier', 'cstr', 'aao']
+prompt_text = f"Enter process unit type ('clarifier', 'cstr', or 'aao'): "
+process_unit = ''
+while process_unit not in valid_units:
+    process_unit = input(prompt_text).lower().strip()
+    if process_unit not in valid_units:
+        print(f"Invalid input. Please enter one of {valid_units}.")
+# --- End of Revision ---
+
 
 # --- Configuration ---
 FILE_PATH = os.path.join('data', 'data.xlsx')
@@ -30,9 +40,10 @@ RANDOM_STATE = 42
 
 # --- PyTorch & Model Hyperparameters ---
 NUM_EPOCHS = 5000
-LEARNING_RATE = 0.0005
+LEARNING_RATE = 0.001
 BATCH_SIZE = -1 # Use -1 for full-batch training
 LOG_INTERVAL = 100 # This is now only for potential future use, as tqdm will show live loss
+L1_LAMBDA = 0 # LASSO regularization parameter
 
 # --- Device Setup ---
 if torch.cuda.is_available():
@@ -47,10 +58,25 @@ def load_and_prepare_data(filepath: str):
     """
     Loads and preprocesses data from the specified Excel file.
     Handles both long and wide formats for the 'all_input' sheet.
+    Filters components based on the 'training_components' sheet.
     """
     print("1. Loading and preparing data...")
+    # This part now dynamically loads the correct sheets based on user input, including 'aao'
     df_input = pd.read_excel(filepath, sheet_name="all_input_" + process_unit)
     df_output = pd.read_excel(filepath, sheet_name="all_output_" + process_unit)
+
+    # --- NEW: Load and process component configuration ---
+    components_to_remove = []
+    try:
+        df_components = pd.read_excel(filepath, sheet_name="training_components")
+        if 'components' in df_components.columns and 'considered' in df_components.columns:
+            components_to_remove = df_components[df_components['considered'] == 0]['components'].tolist()
+            if components_to_remove:
+                print(f"   - Found 'training_components' sheet. Will remove: {components_to_remove}")
+        else:
+            print("   - Warning: 'training_components' sheet is missing 'components' or 'considered' column. Using all components.")
+    except Exception:
+        print("   - Warning: 'training_components' sheet not found. Using all available components.")
 
     if {'variable', 'default'}.issubset(df_input.columns):
         print("   - 'all_input' is in long format. Pivoting data...")
@@ -65,11 +91,27 @@ def load_and_prepare_data(filepath: str):
 
     data = pd.merge(df_input_wide, df_output, on='simulation_number', how='inner')
     
+    y_cols_all = [col for col in data.columns if col.startswith('Target_')]
+    
+    # --- NEW: Filter columns based on components_to_remove ---
+    if components_to_remove:
+        cols_to_drop = []
+        for comp in components_to_remove:
+            # Find matching columns in inputs and outputs
+            cols_to_drop.extend([c for c in input_cols if comp in c])
+            cols_to_drop.extend([c for c in y_cols_all if comp in c])
+        
+        # Drop the identified columns from the main dataframe
+        data.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+        print(f"   - Removed {len(cols_to_drop)} columns corresponding to excluded components.")
+
+    # Re-evaluate column lists after dropping
     y_cols = [col for col in data.columns if col.startswith('Target_')]
     Y = data[y_cols]
 
-    inf_cols = sorted([col for col in input_cols if col.startswith('inf_')])
-    proc_cols = sorted([col for col in input_cols if not col.startswith('inf_')])
+    current_input_cols = [col for col in data.columns if col in input_cols]
+    inf_cols = sorted([col for col in current_input_cols if col.startswith('inf_')])
+    proc_cols = sorted([col for col in current_input_cols if not col.startswith('inf_')])
     x_cols_ordered = proc_cols + inf_cols
     X = data[x_cols_ordered]
 
@@ -153,10 +195,10 @@ class CoupledCLEFOModel(nn.Module):
 # --- Training and Prediction Functions ---
 def train_model_pytorch(X_train, Y_train, Z_train):
     """
-    Trains the CoupledCLEFOModel using PyTorch.
+    Trains the CoupledCLEFOModel using PyTorch with LASSO regularization.
     Loss is reported directly in the tqdm progress bar.
     """
-    print("3. Training CLEFO model with PyTorch...")
+    print("3. Training CLEFO model with PyTorch and LASSO...")
     
     n_samples, n_indep = X_train.shape
     n_dep = Y_train.shape[1]
@@ -178,7 +220,11 @@ def train_model_pytorch(X_train, Y_train, Z_train):
         with tqdm(range(NUM_EPOCHS), desc="Training (Full-Batch)") as pbar:
             for epoch in pbar:
                 Y_pred = model(X_gpu, Z_gpu)
-                loss = criterion(Y_pred, Y_gpu)
+                
+                # Calculate LASSO (L1) penalty
+                l1_penalty = L1_LAMBDA * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1))
+                
+                loss = criterion(Y_pred, Y_gpu) + l1_penalty
                 
                 optimizer.zero_grad()
                 loss.backward()
@@ -196,7 +242,11 @@ def train_model_pytorch(X_train, Y_train, Z_train):
                     X_batch, Y_batch, Z_batch = X_batch.to(device), Y_batch.to(device), Z_batch.to(device)
                     
                     Y_pred = model(X_batch, Z_batch)
-                    loss = criterion(Y_pred, Y_batch)
+                    
+                    # Calculate LASSO (L1) penalty
+                    l1_penalty = L1_LAMBDA * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1))
+                    
+                    loss = criterion(Y_pred, Y_batch) + l1_penalty
                     
                     optimizer.zero_grad()
                     loss.backward()
@@ -205,7 +255,7 @@ def train_model_pytorch(X_train, Y_train, Z_train):
                     epoch_loss += loss.item()
                 
                 avg_loss = epoch_loss / len(train_loader)
-                pbar.set_postfix(Avg_MSE=f'{avg_loss:.6f}')
+                pbar.set_postfix(Avg_MSE_L1=f'{avg_loss:.6f}')
 
     print("Model training complete.")
     return model
@@ -278,6 +328,11 @@ def main():
         
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
     
+    # Check if dataframes are empty after filtering
+    if X.empty or Y.empty:
+        print("Error: No data left after filtering components. Check 'training_components' sheet.")
+        return
+        
     print("2. Splitting and scaling data...")
     X_train, X_test, Y_train, Y_test = train_test_split(
         X, Y, test_size=TEST_SIZE, random_state=RANDOM_STATE
@@ -294,7 +349,10 @@ def main():
 
     trained_model = train_model_pytorch(X_train_s, Y_train_s, Z_train_s)
     
-    os.makedirs('models', exist_ok=True)
+    # This part now dynamically creates the correct folders based on user input
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(OUTPUT_FILE_PATH), exist_ok=True)
+
     print("Saving model and scalers...")
     trained_model.to('cpu')
     model_bundle = {
@@ -341,7 +399,8 @@ def main():
         
         pd.DataFrame(np.hstack([X_train_s, Y_train_s]), columns=x_cols+y_cols).to_excel(writer, sheet_name='scaled_calibration_data', index=False)
         X_test_s = x_scaler.transform(X_test)
-        pd.DataFrame(np.hstack([X_test_s, y_scaler.transform(Y_test)]), columns=x_cols+y_cols).to_excel(writer, sheet_name='scaled_validation_data', index=False)
+        Y_test_s = y_scaler.transform(Y_test)
+        pd.DataFrame(np.hstack([X_test_s, Y_test_s]), columns=x_cols+y_cols).to_excel(writer, sheet_name='scaled_validation_data', index=False)
 
         cal_stats.to_excel(writer, sheet_name='calibration_statistics', index=False)
         val_stats.to_excel(writer, sheet_name='validation_statistics', index=False)
