@@ -7,4 +7,11 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+
+# folders
+data/data_archive/
+data/training_data/
+data/testing_data/
+models/
+src/training/__pycache__/
