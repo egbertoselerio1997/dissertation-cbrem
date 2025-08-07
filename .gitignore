@@ -16,3 +16,4 @@ data/testing_data/
 models/
 src/training/__pycache__/
 src/qsdsan_functions/
+plots/
