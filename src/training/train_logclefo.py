@@ -29,6 +29,25 @@ while process_unit not in valid_units:
     if process_unit not in valid_units:
         print(f"Invalid input. Please enter one of {valid_units}.")
 
+# --- User Input for Solver Type ---
+# 'solve': Standard exact solver (fast, can be unstable if singular)
+# 'pinv': Pseudo-inverse (slower, robust to singular matrices)
+# 'lstsq': Least squares (robust, finds closest solution)
+valid_solvers = ['solve', 'pinv', 'lstsq']
+prompt_solver = f"Enter linear solver type ('solve', 'pinv', or 'lstsq') [default: solve]: "
+solver_type = input(prompt_solver).lower().strip()
+if solver_type not in valid_solvers:
+    print("Invalid or empty input. Defaulting to 'solve'.")
+    solver_type = 'solve'
+
+# --- User Input for Optimizer Type ---
+valid_optimizers = ['adam', 'sgd', 'rmsprop', 'adamw']
+prompt_optim = f"Enter optimizer type ('adam', 'sgd', 'rmsprop', 'adamw') [default: adamw]: "
+optimizer_type = input(prompt_optim).lower().strip()
+if optimizer_type not in valid_optimizers:
+    print("Invalid or empty input. Defaulting to 'adamw'.")
+    optimizer_type = 'adamw'
+
 # --- Configuration ---
 FILE_PATH = os.path.join('data', 'data.xlsx')
 MACHINE_LEARNING_MODEL = 'clefo'
@@ -37,11 +56,11 @@ MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, proces
 RANDOM_STATE = 42
 
 # --- PyTorch & Model Hyperparameters ---
-NUM_EPOCHS = 3000
-LEARNING_RATE = 0.001
+NUM_EPOCHS = 5000 if process_unit == 'clarifier' else 10000
+LEARNING_RATE = 1e-4 # Learning rate for optimizer
 BATCH_SIZE = -1 # Use -1 for full-batch training
-L1_LAMBDA = 1e-4 if process_unit == 'clarifier' else 1e-6 # LASSO regularization parameter
-MSE_EXPLOSION_THRESHOLD = 100 # Threshold to detect exploding loss
+L1_LAMBDA = 1e-3 # LASSO regularization parameter
+MSE_EXPLOSION_THRESHOLD = 1000 # Threshold to detect exploding loss
 
 # --- REVISED: Get N_SPLITS from user ---
 try:
@@ -152,9 +171,10 @@ class CoupledCLEFOModel(nn.Module):
     Implements the coupled linear equations framework using PyTorch.
     Y = (I - Γ - diag(ΛX))⁻¹ * (Υ + BX + ΘZ)
     """
-    def __init__(self, n_dep, n_indep, n_inter):
+    def __init__(self, n_dep, n_indep, n_inter, solver_type='solve'):
         super().__init__()
         self.n_dep = n_dep
+        self.solver_type = solver_type
 
         self.Upsilon = nn.Parameter(torch.randn(n_dep, 1) * 0.01)
         self.B = nn.Parameter(torch.randn(n_dep, n_indep) * 0.01)
@@ -172,6 +192,7 @@ class CoupledCLEFOModel(nn.Module):
         bx = self.B @ X.T
         theta_z = self.Theta @ Z.T
         RHS = upsilon_expanded + bx + theta_z
+        RHS_target = RHS.T.unsqueeze(-1)
 
         lambda_x = self.Lambda @ X.T
         diag_lambda_x = torch.diag_embed(lambda_x.T)
@@ -180,14 +201,32 @@ class CoupledCLEFOModel(nn.Module):
         identity_expanded = self.identity.unsqueeze(0).expand(batch_size, -1, -1)
 
         LHS_matrix = identity_expanded - gamma_expanded - diag_lambda_x
+        # Add slight regularization to prevent singular matrix errors
+        reg = torch.eye(self.n_dep, device=LHS_matrix.device).unsqueeze(0) * 1e-7
+        A = LHS_matrix + reg
 
-        try:
-            reg = torch.eye(self.n_dep, device=LHS_matrix.device).unsqueeze(0) * 1e-7
-            Y_pred_solved = torch.linalg.solve(LHS_matrix + reg, RHS.T.unsqueeze(-1))
-            Y_pred = Y_pred_solved.squeeze(-1)
-        except torch.linalg.LinAlgError:
-            Y_pred = torch.full((batch_size, self.n_dep), float('nan'), device=X.device)
+        # --- Solver Selection ---
+        if self.solver_type == 'pinv':
+            try:
+                A_inv = torch.linalg.pinv(A)
+                Y_pred_solved = A_inv @ RHS_target
+                Y_pred = Y_pred_solved.squeeze(-1)
+            except Exception:
+                Y_pred = torch.full((batch_size, self.n_dep), float('nan'), device=X.device)
+        
+        elif self.solver_type == 'lstsq':
+            try:
+                solution = torch.linalg.lstsq(A, RHS_target).solution
+                Y_pred = solution.squeeze(-1)
+            except Exception:
+                Y_pred = torch.full((batch_size, self.n_dep), float('nan'), device=X.device)
 
+        else: # Default 'solve'
+            try:
+                Y_pred_solved = torch.linalg.solve(A, RHS_target)
+                Y_pred = Y_pred_solved.squeeze(-1)
+            except torch.linalg.LinAlgError:
+                Y_pred = torch.full((batch_size, self.n_dep), float('nan'), device=X.device)
 
         return Y_pred
 
@@ -195,15 +234,29 @@ class CoupledCLEFOModel(nn.Module):
 def train_model_pytorch(X_train, Y_train, Z_train):
     """
     Trains the CoupledCLEFOModel using PyTorch with LASSO regularization.
+    Uses the user-selected optimizer.
     If MSE explodes, returns None to signal a restart.
     """
     n_samples, n_indep = X_train.shape
     n_dep = Y_train.shape[1]
     n_inter = Z_train.shape[1]
 
-    model = CoupledCLEFOModel(n_dep, n_indep, n_inter).to(device)
+    model = CoupledCLEFOModel(n_dep, n_indep, n_inter, solver_type=solver_type).to(device)
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    
+    # --- Optimizer Selection ---
+    if optimizer_type == 'adam':
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    elif optimizer_type == 'sgd':
+        # SGD often requires a higher learning rate or momentum to converge well
+        optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE * 10, momentum=0.9) 
+    elif optimizer_type == 'rmsprop':
+        optimizer = optim.RMSprop(model.parameters(), lr=LEARNING_RATE)
+    elif optimizer_type == 'adamw':
+        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    else:
+        # Fallback
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     train_dataset = WastewaterDataset(X_train, Y_train, Z_train)
     model.train()
@@ -215,7 +268,7 @@ def train_model_pytorch(X_train, Y_train, Z_train):
 
         for epoch in range(NUM_EPOCHS):
             Y_pred = model(X_gpu, Z_gpu)
-            l1_penalty = L1_LAMBDA * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1))
+            l1_penalty = L1_LAMBDA * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1) + torch.norm(model.Lambda, 1) + torch.norm(model.Gamma, 1))
             loss = criterion(Y_pred, Y_gpu) + l1_penalty
             
             if torch.isnan(loss) or torch.isinf(loss) or loss.item() > MSE_EXPLOSION_THRESHOLD:
@@ -308,6 +361,9 @@ def main():
 
     # --- N-Fold Cross-Validation ---
     print(f"\n2. Starting {N_SPLITS}-fold cross-validation...")
+    print(f"   - Solver: {solver_type}")
+    print(f"   - Optimizer: {optimizer_type}")
+    
     kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     all_fold_stats = []
     m = X.shape[1]
@@ -347,7 +403,7 @@ def main():
     print(aggregated_stats)
 
     # --- Final Model Training on ALL Data ---
-    print("\n3. Training final model on the entire dataset...")
+    print(f"\n3. Training final model on the entire dataset ({solver_type}, {optimizer_type})...")
     final_x_scaler = StandardScaler().fit(X)
     final_y_scaler = StandardScaler().fit(Y_log)
 
@@ -372,7 +428,9 @@ def main():
         'model': final_model, 'x_scaler': final_x_scaler, 'y_scaler': final_y_scaler,
         'Upsilon': final_model.Upsilon.detach().numpy(), 'B': final_model.B.detach().numpy(),
         'Theta': final_model.Theta.detach().numpy(), 'Gamma': final_model.Gamma.detach().numpy(),
-        'Lambda': final_model.Lambda.detach().numpy()
+        'Lambda': final_model.Lambda.detach().numpy(),
+        'solver_type': solver_type,
+        'optimizer_type': optimizer_type
     }
     joblib.dump(model_bundle, MODEL_PATH)
     print(f"   - Model bundle saved to {MODEL_PATH}")

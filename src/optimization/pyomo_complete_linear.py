@@ -391,7 +391,7 @@ class WWTPPlantOptimizer:
         w_min = y_log_min
         w_max = y_log_max
         q_values = np.arange(K)
-        pw_domain_pts = (w_min + (q_values / (K - 1))**2 * (w_max - w_min)).tolist()
+        pw_domain_pts = (w_min + (q_values / (K - 1))**PIECEWISE_SPACING * (w_max - w_min)).tolist()
 
         # Define the piecewise linear approximation for unscaled_Y = exp(Y_log)
         b.exp_approximation = pyo.Piecewise(
@@ -518,6 +518,7 @@ if __name__ == "__main__":
     UNSCALED_VAR_BOUNDS = (0.0, 12000.0)
     N_PW_PTS = 50  # Number of breakpoints for the approximation
     PLA_TYPE = 'MC'
+    PIECEWISE_SPACING = 2
 
     try:
         print("\nWhich model would you like to optimize?")

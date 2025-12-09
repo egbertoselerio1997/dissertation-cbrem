@@ -178,7 +178,7 @@ def generate_treatment_train_plots(sim_type, stages, stage_names, predicted_df):
         
         plt.figure(figsize=(12, 7))
         plt.plot(stage_names, simulated_concentrations, marker='o', linestyle='-', label='Simulated (QSDsan)', zorder=10, lw=2.5)
-        plt.plot(stage_names, optimal_predicted_concentrations, marker='x', linestyle='--', label='Optimization Model', zorder=5, lw=1.5)
+        plt.plot(stage_names, optimal_predicted_concentrations, marker='x', linestyle='--', label='Linear Optimization Model', zorder=5, lw=1.5)
 
         for model_name, model_df in other_surrogates_data.items():
             other_surrogate_preds = get_predictions_for_component(model_df, comp_id, stage_prefix_map, stage_names)
@@ -203,7 +203,7 @@ def generate_treatment_train_plots(sim_type, stages, stage_names, predicted_df):
             
         plt.figure(figsize=(12, 7))
         plt.plot(stage_names, simulated_concentrations, marker='o', linestyle='-', label='Simulated (QSDsan)', zorder=10, lw=2.5)
-        plt.plot(stage_names, optimal_predicted_concentrations, marker='x', linestyle='--', label='Optimization Model', zorder=5, lw=1.5)
+        plt.plot(stage_names, optimal_predicted_concentrations, marker='x', linestyle='--', label='Linear Optimization Model', zorder=5, lw=1.5)
 
         for model_name, model_df in other_surrogates_data.items():
             other_surrogate_preds = get_predictions_for_component(model_df, comp_id, stage_prefix_map, stage_names)
