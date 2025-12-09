@@ -14,7 +14,7 @@ def run_dhs_simulation_refined_plotting(t_max=120, influent_sf=10.0):
     total_volume = 10.0  # m3
     flow_rate = 50.0     # m3/d
     num_segments = 3
-    recycle_ratio = 0.5 
+    recycle_ratio = 0 
     
     seg_height = total_height / num_segments
     seg_vol = total_volume / num_segments
@@ -26,7 +26,7 @@ def run_dhs_simulation_refined_plotting(t_max=120, influent_sf=10.0):
     inf_concs = {
         'S_I': 30.0,    
         'S_F': influent_sf, 
-        'S_A': 0.01,    
+        'S_A': 5.0,    
         'X_I': 51.2,    
         'X_S': 202.32,  
         'X_H': 28.17,   

@@ -1,12 +1,13 @@
-# Install required libraries (uncomment if needed)
-# !pip install pandas numpy scikit-learn openpyxl joblib tqdm
-
 import pandas as pd
 import numpy as np
 import os
 import warnings
 import math
 import joblib
+import time
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
 from tqdm import tqdm
 
 # --- Scikit-learn Imports ---
@@ -16,278 +17,355 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.base import BaseEstimator, RegressorMixin
 
-# Suppress warnings for cleaner output
-warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
-warnings.filterwarnings('ignore', category=FutureWarning, module='sklearn')
-
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
 # --- User Input for Process Unit ---
 valid_units = ['clarifier', 'cstr']
-prompt_text = f"Enter process unit type ('clarifier' or 'cstr'): "
-process_unit = ''
-while process_unit not in valid_units:
-    process_unit = input(prompt_text).lower().strip()
-    if process_unit not in valid_units:
-        print(f"Invalid input. Please enter one of {valid_units}.")
+process_unit = input(f"Enter process unit type {valid_units}: ").lower().strip()
+if process_unit not in valid_units: process_unit = 'cstr'
 
-
-# --- Configuration ---
-FILE_PATH = os.path.join('data', 'data.xlsx')
-MACHINE_LEARNING_MODEL = 'gam'
-OUTPUT_FILE_PATH = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'training_stat_' + process_unit, process_unit + '_train_stat.xlsx')
-MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, process_unit + '.joblib')
-RANDOM_STATE = 42
-
-# --- REVISED: Get N_SPLITS from user ---
+# --- Get N_SPLITS from user ---
 try:
     N_SPLITS = int(input("Enter the number of folds for cross-validation (default: 10): ") or 10)
 except ValueError:
-    print("Invalid input. Using default value of 10.")
     N_SPLITS = 10
 
+# Paths
+FILE_PATH = os.path.join('data', 'data.xlsx')
+MACHINE_LEARNING_MODEL = 'gam'
+BASE_OUTPUT_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'training_stat_' + process_unit)
+OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, process_unit + '_train_stat.xlsx')
+MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, process_unit + '.joblib')
+IMG_DIR = os.path.join(BASE_OUTPUT_DIR, 'images')
+
+# Ensure base directories exist immediately
+os.makedirs(IMG_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+
+# Hyperparameters
+RANDOM_STATE = 42
 
 # --- FROM-SCRATCH GAM IMPLEMENTATION ---
 class SplineBasis:
-    """
-    Helper class to generate a truncated power spline basis for a single feature.
-    """
     def __init__(self, n_knots=10):
         self.n_knots = n_knots
         self.knots_ = None
 
     def fit(self, x: np.ndarray):
-        """
-        Finds knot locations from the data using percentiles.
-        """
         if self.n_knots > 0:
             percentiles = np.linspace(0, 100, self.n_knots + 2)[1:-1]
             self.knots_ = np.percentile(x, percentiles)
         return self
 
     def transform(self, x: np.ndarray) -> np.ndarray:
-        """
-        Transforms the data into the spline basis.
-        Basis consists of the original feature and one function per knot.
-        """
         x_reshaped = x.reshape(-1, 1)
         if self.knots_ is None or self.n_knots == 0:
-            return x_reshaped # Linear feature if no knots
-
-        # Truncated power function: max(0, x - knot)
+            return x_reshaped
         basis = [x_reshaped]
         for knot in self.knots_:
             basis.append(np.maximum(0, x_reshaped - knot))
-
         return np.hstack(basis)
 
-
 class GAMRegressor(BaseEstimator, RegressorMixin):
-    """
-    A Generalized Additive Model (GAM) implemented from scratch using a
-    backfitting algorithm and spline basis functions. Designed for a single output.
-    """
     def __init__(self, n_knots=20, max_iter=100, tol=1e-5):
         self.n_knots = n_knots
         self.max_iter = max_iter
         self.tol = tol
 
     def fit(self, X: np.ndarray, y: np.ndarray):
-        """
-        Fits the GAM model using the backfitting algorithm.
-        """
         n_samples, n_features = X.shape
-
         self.spline_bases_ = [SplineBasis(self.n_knots).fit(X[:, i]) for i in range(n_features)]
-
         self.intercept_ = np.mean(y)
         self.coeffs_ = [np.zeros(b.transform(X[:1, i]).shape[1]) for i, b in enumerate(self.spline_bases_)]
         f_values = np.zeros((n_samples, n_features))
 
         for it in range(self.max_iter):
             f_old_sum = f_values.sum()
-
             for j in range(n_features):
                 partial_residuals = y - self.intercept_ - (f_values.sum(axis=1) - f_values[:, j])
                 Bj = self.spline_bases_[j].transform(X[:, j])
-                # Using a small regularization term (ridge) for stability
                 coeffs, _, _, _ = np.linalg.lstsq(Bj, partial_residuals, rcond=None)
                 self.coeffs_[j] = coeffs
                 f_values[:, j] = Bj @ self.coeffs_[j]
-
             if np.sum(np.abs(f_values.sum() - f_old_sum)) < self.tol:
                 break
-
         self.f_values_ = f_values
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Makes predictions on new data.
-        """
         y_pred = np.full(X.shape[0], self.intercept_)
         for j in range(X.shape[1]):
             Bj = self.spline_bases_[j].transform(X[:, j])
             y_pred += Bj @ self.coeffs_[j]
         return y_pred
 
-
-# --- Data Loading and Preparation ---
+# --- Data Loading ---
 def load_and_prepare_data(filepath: str):
-    print("1. Loading and preparing data...")
+    print("1. Loading data...")
     df_input = pd.read_excel(filepath, sheet_name="all_input_" + process_unit)
     df_output = pd.read_excel(filepath, sheet_name="all_output_" + process_unit)
-    components_to_remove = []
-    try:
-        df_components = pd.read_excel(filepath, sheet_name="training_components")
-        if 'components' in df_components.columns and 'considered' in df_components.columns:
-            components_to_remove = df_components[df_components['considered'] == 0]['components'].tolist()
-            if components_to_remove:
-                print(f"   - Found 'training_components' sheet. Will remove: {components_to_remove}")
-    except Exception:
-        print("   - Warning: 'training_components' sheet not found.")
+
     if {'variable', 'default'}.issubset(df_input.columns):
         df_input_wide = df_input.pivot(index='simulation_number', columns='variable', values='default').reset_index()
         input_cols = df_input['variable'].unique().tolist()
     else:
         df_input_wide = df_input
         input_cols = [col for col in df_input.columns if col != 'simulation_number']
+
     data = pd.merge(df_input_wide, df_output, on='simulation_number', how='inner')
-    y_cols_all = [col for col in data.columns if col.startswith('Target_')]
-    if components_to_remove:
-        cols_to_drop = []
-        for comp in components_to_remove:
-            cols_to_drop.extend([c for c in input_cols if comp in c])
-            cols_to_drop.extend([c for c in y_cols_all if comp in c])
-        data.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-        print(f"   - Removed {len(cols_to_drop)} columns corresponding to excluded components.")
+    
+    try:
+        df_comps = pd.read_excel(filepath, sheet_name="training_components")
+        if 'considered' in df_comps.columns:
+            remove = df_comps[df_comps['considered'] == 0]['components'].tolist()
+            cols_to_drop = [c for c in data.columns if any(r in c for r in remove)]
+            data.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+    except:
+        pass
+
     y_cols = [col for col in data.columns if col.startswith('Target_')]
-    Y = data[y_cols]
-    current_input_cols = [col for col in data.columns if col in input_cols]
-    inf_cols = sorted([col for col in current_input_cols if col.startswith('inf_')])
-    proc_cols = sorted([col for col in current_input_cols if not col.startswith('inf_')])
+    current_inputs = [col for col in data.columns if col in input_cols]
+    inf_cols = sorted([c for c in current_inputs if c.startswith('inf_')])
+    proc_cols = sorted([c for c in current_inputs if not c.startswith('inf_')])
     x_cols_ordered = proc_cols + inf_cols
-    X = data[x_cols_ordered]
-    print(f"Data prepared successfully: {X.shape[1]} inputs, {Y.shape[1]} outputs.")
-    return X, Y, x_cols_ordered, y_cols
 
+    return data[x_cols_ordered], data[y_cols], x_cols_ordered, y_cols
 
-# --- Evaluation ---
-def calculate_statistics(y_true: pd.DataFrame, y_pred: np.ndarray, num_predictors: int):
-    stats = []
-    y_cols = y_true.columns
-    for i, col_name in enumerate(y_cols):
-        y_t = y_true[col_name].values
-        y_p = y_pred[:, i]
-        valid_indices = ~np.isnan(y_p)
-        y_t, y_p = y_t[valid_indices], y_p[valid_indices]
-        mse = mean_squared_error(y_t, y_p)
-        r2 = r2_score(y_t, y_p)
-        adj_r2 = 1 - (1 - r2) * (len(y_t) - 1) / (len(y_t) - num_predictors - 1) if (len(y_t) - num_predictors - 1) > 0 else np.nan
-        stats.append({
-            'variable': col_name, 'MSE': mse, 'RMSE': math.sqrt(mse), 'MAE': mean_absolute_error(y_t, y_p),
-            'R2': r2, 'Adj_R2': adj_r2
-        })
-    return pd.DataFrame(stats)
+# --- Analysis Functions ---
 
+def calculate_permutation_importance(model, X, Y, feature_names):
+    """Calculates feature importance using Permutation Importance."""
+    baseline_pred = model.predict(X)
+    baseline_loss = mean_squared_error(Y, baseline_pred)
+    
+    importances = []
+    for i, col in enumerate(feature_names):
+        X_permuted = X.copy()
+        np.random.shuffle(X_permuted[:, i])
+        
+        perm_pred = model.predict(X_permuted)
+        perm_loss = mean_squared_error(Y, perm_pred)
+        importances.append(perm_loss - baseline_loss)
+        
+    importances = np.array(importances)
+    importances = np.maximum(importances, 0)
+    if np.sum(importances) > 0:
+        importances = 100 * importances / np.sum(importances)
+    
+    df_imp = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
+    return df_imp.sort_values('Importance', ascending=False)
 
-# --- Main Execution Workflow ---
+def analyze_regime_generalization(X, Y_true, Y_pred, x_cols, y_cols):
+    """
+    Stratifies data by KLa (Oxygen Transfer) and calculates MAPE for each regime.
+    Regimes: Oxygen Limited (<50), Transition (50-150), High Aeration (>150).
+    """
+    print("   - Running Regime Generalization Analysis...")
+    
+    # Identify KLa columns (case insensitive)
+    kla_cols = [c for c in x_cols if 'kla' in c.lower()]
+    
+    if not kla_cols:
+        print("     [Warning] No 'KLa' columns found. Skipping regime analysis.")
+        return pd.DataFrame()
+
+    # Calculate mean KLa for stratification
+    kla_values = X[kla_cols].mean(axis=1)
+    
+    regimes = {
+        'Oxygen Limited (<50)': kla_values < 50,
+        'Transition (50-150)': (kla_values >= 50) & (kla_values <= 150),
+        'High Aeration (>150)': kla_values > 150
+    }
+    
+    results = []
+    
+    for regime_name, mask in regimes.items():
+        if not mask.any():
+            continue
+            
+        y_t_reg = Y_true[mask]
+        y_p_reg = Y_pred[mask]
+        
+        for i, col in enumerate(y_cols):
+            # Calculate MAPE (Mean Absolute Percentage Error)
+            y_true_safe = y_t_reg.iloc[:, i].replace(0, 1e-6)
+            mape = np.mean(np.abs((y_true_safe - y_p_reg[:, i]) / y_true_safe)) * 100
+            
+            results.append({
+                'Regime': regime_name,
+                'Variable': col,
+                'MAPE (%)': mape,
+                'Sample_Count': mask.sum()
+            })
+            
+    df_res = pd.DataFrame(results)
+    
+    if not df_res.empty:
+        # Plotting
+        plt.figure(figsize=(12, 6))
+        sns.barplot(data=df_res, x='Regime', y='MAPE (%)', hue='Variable')
+        plt.title('Regime Generalization Analysis (MAPE)')
+        plt.ylabel('Mean Absolute Percentage Error (%)')
+        plt.grid(True, axis='y', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(IMG_DIR, 'regime_analysis.png'), dpi=300)
+        plt.close()
+        
+    return df_res
+
+def plot_parity(Y_true, Y_pred, y_cols, save_path, title_prefix=""):
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    n_vars = len(y_cols)
+    cols = 3
+    rows = math.ceil(n_vars / cols)
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
+    axes = axes.flatten()
+    
+    if isinstance(Y_true, (pd.DataFrame, pd.Series)):
+        Y_true_np = Y_true.values
+    else:
+        Y_true_np = Y_true
+
+    for i, col in enumerate(y_cols):
+        ax = axes[i]
+        y_t = Y_true_np[:, i]
+        y_p = Y_pred[:, i]
+        min_val = min(y_t.min(), y_p.min())
+        max_val = max(y_t.max(), y_p.max())
+        ax.scatter(y_t, y_p, alpha=0.5, s=10)
+        ax.plot([min_val, max_val], [min_val, max_val], 'r--')
+        ax.set_title(f"{title_prefix} {col}")
+        ax.set_xlabel('Observed')
+        ax.set_ylabel('Predicted')
+        ax.grid(True)
+        
+    for j in range(i+1, len(axes)): axes[j].axis('off')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+# --- Main Workflow ---
 def main():
     if not os.path.exists(FILE_PATH):
-        print(f"Error: The data file was not found at '{FILE_PATH}'")
+        print(f"Error: File not found at {FILE_PATH}")
         return
 
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
-
-    if X.empty or Y.empty:
-        print("Error: No data left after filtering. Check 'training_components' sheet.")
-        return
-
-    print("   - Applying natural log transformation to Y for training.")
     Y_log = np.log(Y)
 
-    # --- N-Fold Cross-Validation ---
-    print(f"\n2. Starting {N_SPLITS}-fold cross-validation...")
+    # 2. K-Fold Cross-Validation
+    print(f"\n2. Starting {N_SPLITS}-Fold Cross-Validation...")
     kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
-    all_fold_stats = []
+    
+    kfold_detailed_results = []
 
-    for fold, (train_index, test_index) in enumerate(tqdm(kf.split(X, Y_log), total=N_SPLITS, desc="Cross-Validation")):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        Y_log_train, Y_log_test = Y_log.iloc[train_index], Y_log.iloc[test_index]
-        Y_test = Y.iloc[test_index]
+    for fold, (tr_idx, te_idx) in enumerate(tqdm(kf.split(X, Y_log), total=N_SPLITS)):
+        X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
+        Y_tr_log, Y_te = Y_log.iloc[tr_idx], Y.iloc[te_idx]
+        
+        Y_tr_real = np.exp(Y_tr_log)
 
-        x_scaler = StandardScaler().fit(X_train.values)
-        y_scaler = StandardScaler().fit(Y_log_train.values)
-
-        X_train_s = x_scaler.transform(X_train.values)
-        X_test_s = x_scaler.transform(X_test.values)
-        Y_train_s = y_scaler.transform(Y_log_train.values)
-
+        sc_x = StandardScaler().fit(X_tr.values)
+        sc_y = StandardScaler().fit(Y_tr_log.values)
+        
+        X_tr_s = sc_x.transform(X_tr.values)
+        X_te_s = sc_x.transform(X_te.values)
+        Y_tr_s = sc_y.transform(Y_tr_log.values)
+        
         gam_estimator = GAMRegressor(n_knots=15, max_iter=100, tol=1e-5)
         model = MultiOutputRegressor(estimator=gam_estimator, n_jobs=-1)
-        model.fit(X_train_s, Y_train_s)
+        model.fit(X_tr_s, Y_tr_s)
+        
+        # Predictions
+        Y_pred_tr_s = model.predict(X_tr_s)
+        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s))
+        
+        Y_pred_te_s = model.predict(X_te_s)
+        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s))
+        
+        # Metrics
+        for i, col in enumerate(y_cols):
+            mse_tr = mean_squared_error(Y_tr_real.iloc[:, i], Y_pred_tr[:, i])
+            r2_tr = r2_score(Y_tr_real.iloc[:, i], Y_pred_tr[:, i])
+            kfold_detailed_results.append({
+                'Fold': fold + 1, 'Type': 'Train', 'Variable': col, 
+                'MSE': mse_tr, 'RMSE': np.sqrt(mse_tr), 'R2': r2_tr
+            })
+            
+            mse_te = mean_squared_error(Y_te.iloc[:, i], Y_pred_te[:, i])
+            r2_te = r2_score(Y_te.iloc[:, i], Y_pred_te[:, i])
+            kfold_detailed_results.append({
+                'Fold': fold + 1, 'Type': 'Test', 'Variable': col, 
+                'MSE': mse_te, 'RMSE': np.sqrt(mse_te), 'R2': r2_te
+            })
 
-        Y_pred_test_s = model.predict(X_test_s)
-        Y_pred_test_log = y_scaler.inverse_transform(Y_pred_test_s)
-        Y_pred_test = np.exp(Y_pred_test_log)
+        # Plots
+        fold_dir = os.path.join(IMG_DIR, f'fold_{fold+1}')
+        os.makedirs(fold_dir, exist_ok=True)
+        plot_parity(Y_tr_real, Y_pred_tr, y_cols, os.path.join(fold_dir, 'parity_train.png'), f"Fold {fold+1} Train")
+        plot_parity(Y_te, Y_pred_te, y_cols, os.path.join(fold_dir, 'parity_test.png'), f"Fold {fold+1} Test")
 
-        num_predictors = X.shape[1]
-        fold_stats = calculate_statistics(Y_test, Y_pred_test, num_predictors)
-        all_fold_stats.append(fold_stats)
+    kfold_df = pd.DataFrame(kfold_detailed_results)
+    cv_summary = kfold_df[kfold_df['Type'] == 'Test'].groupby('Variable').agg({'R2': ['mean', 'std'], 'RMSE': ['mean', 'std']})
+    print("\nCross-Validation Results (Test Set):")
+    print(cv_summary['R2'])
 
-    print("\n--- Cross-Validation Complete ---")
-    cv_results_df = pd.concat(all_fold_stats)
-    aggregated_stats = cv_results_df.groupby('variable').agg(['mean', 'std'])
-    print("Aggregated Cross-Validation Performance (Mean +/- Std Dev):")
-    print(aggregated_stats)
-
-    # --- Final Model Training on ALL Data ---
-    print("\n3. Training final model on the entire dataset...")
-    final_x_scaler = StandardScaler().fit(X.values)
-    final_y_scaler = StandardScaler().fit(Y_log.values)
-
-    X_s_full = final_x_scaler.transform(X.values)
-    Y_log_s_full = final_y_scaler.transform(Y_log.values)
-
+    # 3. Final Model Training
+    print("\n3. Training Final Model...")
+    sc_x_final = StandardScaler().fit(X.values)
+    sc_y_final = StandardScaler().fit(Y_log.values)
+    X_s = sc_x_final.transform(X.values)
+    Y_s = sc_y_final.transform(Y_log.values)
+    
+    start_time = time.time()
     final_gam_estimator = GAMRegressor(n_knots=15, max_iter=100, tol=1e-5)
     final_model = MultiOutputRegressor(estimator=final_gam_estimator, n_jobs=-1)
-    final_model.fit(X_s_full, Y_log_s_full)
-    print("   - Final model training complete.")
+    final_model.fit(X_s, Y_s)
+    train_time = time.time() - start_time
+    print(f"   - Training Time: {train_time:.2f} seconds")
 
-    # --- Saving Final Model and Results ---
-    print("\n4. Saving final model, scalers, and results...")
-    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    os.makedirs(os.path.dirname(OUTPUT_FILE_PATH), exist_ok=True)
+    # 4. Generate Predictions & Plots
+    Y_pred_s_full = final_model.predict(X_s)
+    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
+    
+    print("   - Generating Final Parity Plot...")
+    plot_parity(Y, Y_pred_full, y_cols, os.path.join(IMG_DIR, 'parity_plot_final_model.png'), "Final Model")
+    
+    print("   - Calculating Feature Importance (Permutation)...")
+    imp_df = calculate_permutation_importance(final_model, X_s, Y_s, x_cols)
 
-    model_bundle = {
-        'model': final_model,
-        'x_scaler': final_x_scaler,
-        'y_scaler': final_y_scaler
-    }
-    joblib.dump(model_bundle, MODEL_PATH)
-    print(f"   - Model bundle saved to {MODEL_PATH}")
+    # 5. Regime Generalization Analysis
+    regime_df = analyze_regime_generalization(X, Y, Y_pred_full, x_cols, y_cols)
 
-    # --- Evaluate Final Model on Full Dataset for Reporting ---
-    print("\n5. Evaluating final model on full dataset for reporting...")
-    Y_pred_full_s = final_model.predict(X_s_full)
-    Y_pred_full_log = final_y_scaler.inverse_transform(Y_pred_full_s)
-    Y_pred_full = np.exp(Y_pred_full_log)
-
-    full_dataset_stats = calculate_statistics(Y, Y_pred_full, X.shape[1])
-    print("\n--- Validation Performance (Test Set) ---")
-    print("(Note: This is the performance of the final model on the full dataset)")
-    print(full_dataset_stats)
+    # 6. Save Results
+    print(f"\n4. Saving results to {OUTPUT_FILE_PATH}...")
+    full_stats = []
+    for i, col in enumerate(y_cols):
+        mse = mean_squared_error(Y.iloc[:, i], Y_pred_full[:, i])
+        full_stats.append({'Variable': col, 'MSE': mse, 'RMSE': np.sqrt(mse), 'R2': r2_score(Y.iloc[:, i], Y_pred_full[:, i])})
+    full_stats_df = pd.DataFrame(full_stats)
 
     with pd.ExcelWriter(OUTPUT_FILE_PATH, engine='xlsxwriter') as writer:
-        aggregated_stats.to_excel(writer, sheet_name='cross_val_statistics')
-        pd.concat([X, Y], axis=1).to_excel(writer, sheet_name='calibration_data', index=False)
-        full_dataset_stats.to_excel(writer, sheet_name='calibration_statistics', index=False)
-        pd.DataFrame(Y_pred_full, columns=y_cols, index=Y.index).to_excel(writer, sheet_name='calibration_prediction', index=False)
-        pd.DataFrame().to_excel(writer, sheet_name='validation_data', index=False)
-        pd.DataFrame().to_excel(writer, sheet_name='validation_statistics', index=False)
-        pd.DataFrame().to_excel(writer, sheet_name='validation_prediction', index=False)
+        cv_summary.to_excel(writer, sheet_name='CV_Summary')
+        kfold_df.to_excel(writer, sheet_name='KFold_Detailed_Results', index=False)
+        full_stats_df.to_excel(writer, sheet_name='Final_Model_Stats')
+        imp_df.to_excel(writer, sheet_name='Feature_Importance')
+        if not regime_df.empty:
+            regime_df.to_excel(writer, sheet_name='Regime_Analysis', index=False)
+        pd.DataFrame({'Training_Time_Sec': [train_time]}).to_excel(writer, sheet_name='Comp_Cost')
+        
+        pd.concat([X, Y], axis=1).to_excel(writer, sheet_name='Calibration_Data', index=False)
+        pd.DataFrame(Y_pred_full, columns=y_cols).to_excel(writer, sheet_name='Calibration_Preds', index=False)
 
-    print(f"\nProcess finished successfully. Results are saved in '{OUTPUT_FILE_PATH}'.")
+    joblib.dump({
+        'model': final_model, 'x_scaler': sc_x_final, 'y_scaler': sc_y_final,
+        'x_cols': x_cols, 'y_cols': y_cols
+    }, MODEL_PATH)
 
+    print("Done.")
 
 if __name__ == '__main__':
     main()
