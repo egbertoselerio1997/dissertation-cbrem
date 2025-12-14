@@ -7,22 +7,23 @@ import joblib
 import time
 import re
 from tqdm import tqdm
+import optuna
 
 # --- Matplotlib Backend Fix ---
-# Must be set before importing pyplot to prevent "main thread is not in main loop" errors
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 # --- Scikit-learn Imports ---
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # --- User Input for Process Unit ---
 valid_units = ['clarifier', 'cstr']
@@ -43,9 +44,14 @@ OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, process_unit + '_train_stat.xls
 MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, process_unit + '.joblib')
 IMG_DIR = os.path.join(BASE_OUTPUT_DIR, 'images')
 
+# Hyperparameter Paths
+HYPERPARAM_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'hyperparameters')
+HYPERPARAM_FILE = os.path.join(HYPERPARAM_DIR, 'hyperparameters.xlsx')
+
 # Ensure base directories exist immediately
 os.makedirs(IMG_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+os.makedirs(HYPERPARAM_DIR, exist_ok=True)
 
 # Hyperparameters
 RANDOM_STATE = 42
@@ -82,26 +88,88 @@ def load_and_prepare_data(filepath: str):
 
     return data[x_cols_ordered], data[y_cols], x_cols_ordered, y_cols
 
+# --- Hyperparameter Optimization ---
+def get_hyperparameters(X_s, Y_s):
+    """
+    Fetches hyperparameters from Excel. If missing, runs Optuna optimization,
+    saves the results, and returns them.
+    """
+    params = {}
+    file_exists = os.path.exists(HYPERPARAM_FILE)
+    
+    if file_exists:
+        try:
+            df_params = pd.read_excel(HYPERPARAM_FILE)
+            required_cols = ['n_estimators', 'max_depth', 'min_samples_split', 'min_samples_leaf']
+            if all(col in df_params.columns for col in required_cols) and not df_params.empty:
+                params['n_estimators'] = int(df_params['n_estimators'].iloc[0])
+                params['max_depth'] = int(df_params['max_depth'].iloc[0])
+                params['min_samples_split'] = int(df_params['min_samples_split'].iloc[0])
+                params['min_samples_leaf'] = int(df_params['min_samples_leaf'].iloc[0])
+                print(f"Loaded hyperparameters from {HYPERPARAM_FILE}")
+                return params
+        except Exception as e:
+            print(f"Error reading hyperparameter file: {e}. Proceeding to optimization.")
+
+    print("Hyperparameters not found or invalid. Starting Optuna optimization...")
+    
+    # Split data for optimization
+    X_train, X_val, Y_train, Y_val = train_test_split(X_s, Y_s, test_size=0.2, random_state=RANDOM_STATE)
+
+    def objective(trial):
+        n_estimators = trial.suggest_int('n_estimators', 50, 500)
+        max_depth = trial.suggest_int('max_depth', 5, 50)
+        min_samples_split = trial.suggest_int('min_samples_split', 2, 10)
+        min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 10)
+        
+        model = RandomForestRegressor(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            n_jobs=-1,
+            random_state=RANDOM_STATE
+        )
+        model.fit(X_train, Y_train)
+        
+        preds = model.predict(X_val)
+        mse = mean_squared_error(Y_val, preds)
+        return mse
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=20, show_progress_bar=True)
+    
+    best_params = study.best_params
+    print("Optimization finished. Best parameters:")
+    print(best_params)
+    
+    # Save to Excel
+    df_best = pd.DataFrame([best_params])
+    df_best.to_excel(HYPERPARAM_FILE, index=False)
+    print(f"Saved optimized hyperparameters to {HYPERPARAM_FILE}")
+    
+    return best_params
+
 # --- Model Training ---
-def train_random_forest_model(X_train: np.ndarray, Y_train: np.ndarray):
+def train_random_forest_model(X_train: np.ndarray, Y_train: np.ndarray, params: dict):
     rf_model = RandomForestRegressor(
+        n_estimators=int(params['n_estimators']),
+        max_depth=int(params['max_depth']),
+        min_samples_split=int(params['min_samples_split']),
+        min_samples_leaf=int(params['min_samples_leaf']),
         bootstrap=True,
         ccp_alpha=0.0,
         criterion='squared_error',
-        max_depth=None,
-        max_features=10,
+        max_features=1.0, # Default to using all features or fraction
         max_leaf_nodes=None,
         max_samples=None,
         min_impurity_decrease=0.0,
-        min_samples_leaf=1,
-        min_samples_split=2,
         min_weight_fraction_leaf=0.0,
-        n_estimators=1000,
         n_jobs=-1,
         oob_score=False,
         random_state=RANDOM_STATE,
         verbose=0,
-        warm_start=True
+        warm_start=False
     )
     rf_model.fit(X_train, Y_train)
     return rf_model
@@ -216,8 +284,18 @@ def main():
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
     Y_log = np.log(Y)
 
-    # 2. K-Fold Cross-Validation
-    print(f"\n2. Starting {N_SPLITS}-Fold Cross-Validation...")
+    # Prepare Scaled Data for Optimization
+    sc_x_temp = StandardScaler().fit(X)
+    sc_y_temp = StandardScaler().fit(Y_log)
+    X_s_temp = sc_x_temp.transform(X)
+    Y_s_temp = sc_y_temp.transform(Y_log)
+
+    # 2. Get Hyperparameters (Load or Optimize)
+    print("\n2. Fetching Hyperparameters...")
+    hp = get_hyperparameters(X_s_temp, Y_s_temp)
+
+    # 3. K-Fold Cross-Validation
+    print(f"\n3. Starting {N_SPLITS}-Fold Cross-Validation...")
     kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     
     kfold_detailed_results = []
@@ -235,7 +313,7 @@ def main():
         X_te_s = sc_x.transform(X_te)
         Y_tr_s = sc_y.transform(Y_tr_log)
         
-        model = train_random_forest_model(X_tr_s, Y_tr_s)
+        model = train_random_forest_model(X_tr_s, Y_tr_s, hp)
         
         # Predictions
         Y_pred_tr_s = model.predict(X_tr_s)
@@ -271,19 +349,19 @@ def main():
     print("\nCross-Validation Results (Test Set):")
     print(cv_summary['R2'])
 
-    # 3. Final Model Training
-    print("\n3. Training Final Model...")
+    # 4. Final Model Training
+    print("\n4. Training Final Model...")
     sc_x_final = StandardScaler().fit(X)
     sc_y_final = StandardScaler().fit(Y_log)
     X_s = sc_x_final.transform(X)
     Y_s = sc_y_final.transform(Y_log)
     
     start_time = time.time()
-    final_model = train_random_forest_model(X_s, Y_s)
+    final_model = train_random_forest_model(X_s, Y_s, hp)
     train_time = time.time() - start_time
     print(f"   - Training Time: {train_time:.2f} seconds")
 
-    # 4. Generate Predictions & Plots
+    # 5. Generate Predictions & Plots
     Y_pred_s_full = final_model.predict(X_s)
     Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
     
@@ -293,11 +371,11 @@ def main():
     print("   - Calculating Feature Importance...")
     imp_df = calculate_rf_importance(final_model, x_cols)
 
-    # 5. Regime Generalization Analysis
+    # 6. Regime Generalization Analysis
     regime_df = analyze_regime_generalization(X, Y, Y_pred_full, x_cols, y_cols)
 
-    # 6. Save Results
-    print(f"\n4. Saving results to {OUTPUT_FILE_PATH}...")
+    # 7. Save Results
+    print(f"\n5. Saving results to {OUTPUT_FILE_PATH}...")
     full_stats = []
     for i, col in enumerate(y_cols):
         mse = mean_squared_error(Y.iloc[:, i], Y_pred_full[:, i])
@@ -318,7 +396,8 @@ def main():
 
     joblib.dump({
         'model': final_model, 'x_scaler': sc_x_final, 'y_scaler': sc_y_final,
-        'x_cols': x_cols, 'y_cols': y_cols
+        'x_cols': x_cols, 'y_cols': y_cols,
+        'hyperparameters': hp
     }, MODEL_PATH)
 
     print("Done.")

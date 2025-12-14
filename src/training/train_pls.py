@@ -9,15 +9,17 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 from tqdm import tqdm
+import optuna
 
 # --- Scikit-learn Imports ---
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.cross_decomposition import PLSRegression  # Changed import
+from sklearn.cross_decomposition import PLSRegression
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # --- User Input for Process Unit ---
 valid_units = ['clarifier', 'cstr']
@@ -32,19 +34,23 @@ except ValueError:
 
 # Paths
 FILE_PATH = os.path.join('data', 'data.xlsx')
-MACHINE_LEARNING_MODEL = 'pls'  # Changed model name
+MACHINE_LEARNING_MODEL = 'pls'
 BASE_OUTPUT_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'training_stat_' + process_unit)
 OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, process_unit + '_train_stat.xlsx')
 MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, process_unit + '.joblib')
 IMG_DIR = os.path.join(BASE_OUTPUT_DIR, 'images')
 
+# Hyperparameter Paths
+HYPERPARAM_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'hyperparameters')
+HYPERPARAM_FILE = os.path.join(HYPERPARAM_DIR, 'hyperparameters.xlsx')
+
 # Ensure base directories exist immediately
 os.makedirs(IMG_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+os.makedirs(HYPERPARAM_DIR, exist_ok=True)
 
 # Hyperparameters
 RANDOM_STATE = 42
-PLS_COMPONENTS = 10  # Number of components for PLS
 
 # --- Data Loading ---
 def load_and_prepare_data(filepath: str):
@@ -77,6 +83,61 @@ def load_and_prepare_data(filepath: str):
     x_cols_ordered = proc_cols + inf_cols
 
     return data[x_cols_ordered], data[y_cols], x_cols_ordered, y_cols
+
+# --- Hyperparameter Optimization ---
+def get_hyperparameters(X_s, Y_s):
+    """
+    Fetches hyperparameters from Excel. If missing, runs Optuna optimization,
+    saves the results, and returns them.
+    """
+    params = {}
+    file_exists = os.path.exists(HYPERPARAM_FILE)
+    
+    if file_exists:
+        try:
+            df_params = pd.read_excel(HYPERPARAM_FILE)
+            if 'n_components' in df_params.columns and not df_params.empty:
+                params['n_components'] = int(df_params['n_components'].iloc[0])
+                print(f"Loaded hyperparameters from {HYPERPARAM_FILE}")
+                return params
+        except Exception as e:
+            print(f"Error reading hyperparameter file: {e}. Proceeding to optimization.")
+
+    print("Hyperparameters not found or invalid. Starting Optuna optimization...")
+    
+    # Split data for optimization
+    X_train, X_val, Y_train, Y_val = train_test_split(X_s, Y_s, test_size=0.2, random_state=RANDOM_STATE)
+    
+    # Max components cannot exceed number of features or samples
+    max_possible_components = min(X_train.shape[1], X_train.shape[0] - 1)
+    
+    # If features are very few, ensure at least 1
+    if max_possible_components < 1:
+        max_possible_components = 1
+
+    def objective(trial):
+        n_comp = trial.suggest_int('n_components', 1, max_possible_components)
+        
+        model = PLSRegression(n_components=n_comp)
+        model.fit(X_train, Y_train)
+        
+        preds = model.predict(X_val)
+        mse = mean_squared_error(Y_val, preds)
+        return mse
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=20, show_progress_bar=True)
+    
+    best_params = study.best_params
+    print("Optimization finished. Best parameters:")
+    print(best_params)
+    
+    # Save to Excel
+    df_best = pd.DataFrame([best_params])
+    df_best.to_excel(HYPERPARAM_FILE, index=False)
+    print(f"Saved optimized hyperparameters to {HYPERPARAM_FILE}")
+    
+    return best_params
 
 # --- Analysis Functions ---
 
@@ -202,8 +263,19 @@ def main():
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
     Y_log = np.log(Y)
 
-    # 2. K-Fold Cross-Validation
-    print(f"\n2. Starting {N_SPLITS}-Fold Cross-Validation...")
+    # Prepare Scaled Data for Optimization
+    sc_x_temp = StandardScaler().fit(X.values)
+    sc_y_temp = StandardScaler().fit(Y_log.values)
+    X_s_temp = sc_x_temp.transform(X.values)
+    Y_s_temp = sc_y_temp.transform(Y_log.values)
+
+    # 2. Get Hyperparameters (Load or Optimize)
+    print("\n2. Fetching Hyperparameters...")
+    hp = get_hyperparameters(X_s_temp, Y_s_temp)
+    PLS_COMPONENTS = hp['n_components']
+
+    # 3. K-Fold Cross-Validation
+    print(f"\n3. Starting {N_SPLITS}-Fold Cross-Validation...")
     kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     
     kfold_detailed_results = []
@@ -222,7 +294,7 @@ def main():
         Y_tr_s = sc_y.transform(Y_tr_log.values)
         
         # PLS Regression
-        # Ensure n_components is not greater than n_features
+        # Ensure n_components is not greater than n_features in this specific fold
         n_comps = min(PLS_COMPONENTS, X_tr_s.shape[1])
         model = PLSRegression(n_components=n_comps)
         model.fit(X_tr_s, Y_tr_s)
@@ -261,8 +333,8 @@ def main():
     print("\nCross-Validation Results (Test Set):")
     print(cv_summary['R2'])
 
-    # 3. Final Model Training
-    print("\n3. Training Final Model...")
+    # 4. Final Model Training
+    print("\n4. Training Final Model...")
     sc_x_final = StandardScaler().fit(X.values)
     sc_y_final = StandardScaler().fit(Y_log.values)
     X_s = sc_x_final.transform(X.values)
@@ -275,7 +347,7 @@ def main():
     train_time = time.time() - start_time
     print(f"   - Training Time: {train_time:.2f} seconds")
 
-    # 4. Generate Predictions & Plots
+    # 5. Generate Predictions & Plots
     Y_pred_s_full = final_model.predict(X_s)
     Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
     
@@ -285,11 +357,11 @@ def main():
     print("   - Calculating Feature Importance (Permutation)...")
     imp_df = calculate_permutation_importance(final_model, X_s, Y_s, x_cols)
 
-    # 5. Regime Generalization Analysis
+    # 6. Regime Generalization Analysis
     regime_df = analyze_regime_generalization(X, Y, Y_pred_full, x_cols, y_cols)
 
-    # 6. Save Results
-    print(f"\n4. Saving results to {OUTPUT_FILE_PATH}...")
+    # 7. Save Results
+    print(f"\n5. Saving results to {OUTPUT_FILE_PATH}...")
     full_stats = []
     for i, col in enumerate(y_cols):
         mse = mean_squared_error(Y.iloc[:, i], Y_pred_full[:, i])
@@ -310,7 +382,8 @@ def main():
 
     joblib.dump({
         'model': final_model, 'x_scaler': sc_x_final, 'y_scaler': sc_y_final,
-        'x_cols': x_cols, 'y_cols': y_cols
+        'x_cols': x_cols, 'y_cols': y_cols,
+        'hyperparameters': hp
     }, MODEL_PATH)
 
     print("Done.")

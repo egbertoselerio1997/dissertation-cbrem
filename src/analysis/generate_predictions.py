@@ -9,7 +9,6 @@ import itertools
 
 # --- Model Library Class Definitions (Required for loading joblib files) ---
 # These classes must be defined so that 'joblib.load' can unpickle the model objects.
-# The actual logic is contained within the loaded objects.
 
 # Suppress library warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
@@ -234,26 +233,48 @@ class SurrogateModelPredictor:
         x_features, y_features = self.feature_names[unit_type]['x'], self.feature_names[unit_type]['y']
         
         X_df_ordered = X_df[x_features]
-        X_scaled = x_scaler.transform(X_df_ordered.values)
+        
+        # --- Sanitization Step ---
+        # Replace NaNs with 0 and Infs with a safe large number or 0 to prevent scaler crashes
+        X_values = X_df_ordered.values
+        if not np.all(np.isfinite(X_values)):
+            X_values = np.nan_to_num(X_values, nan=0.0, posinf=1e6, neginf=-1e6)
+            
+        X_scaled = x_scaler.transform(X_values)
 
         if model_type in ['ann', 'clefo']:
             model.eval()
+            # --- Device Handling Fix ---
+            # Detect the device the model is on (CPU or CUDA)
+            try:
+                device = next(model.parameters()).device
+            except StopIteration:
+                device = torch.device('cpu')
+            
             with torch.no_grad():
-                X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
+                # Move input tensor to the same device as the model
+                X_tensor = torch.tensor(X_scaled, dtype=torch.float32).to(device)
+                
                 if model_type == 'clefo':
                     m = X_scaled.shape[1]
                     Z_scaled = self.create_interaction_features_np(X_scaled, m)
-                    Z_tensor = torch.tensor(Z_scaled, dtype=torch.float32)
+                    Z_tensor = torch.tensor(Z_scaled, dtype=torch.float32).to(device)
                     Y_pred_scaled_tensor = model(X_tensor, Z_tensor)
                 else: # 'ann'
                     Y_pred_scaled_tensor = model(X_tensor)
+                
+                # Move result back to CPU for numpy conversion
                 Y_pred_scaled = Y_pred_scaled_tensor.cpu().numpy()
-        elif model_type in ['lightgbm', 'xgboost', 'random_forest', 'knn', 'gam', 'glm', 'svr']:
+        elif model_type in ['pls', 'lightgbm', 'xgboost', 'random_forest', 'knn', 'gam']:
             Y_pred_scaled = model.predict(X_scaled)
         else:
             raise NotImplementedError(f"Prediction logic for model type '{model_type}' is not implemented.")
 
         Y_pred_log = y_scaler.inverse_transform(Y_pred_scaled)
+
+        # --- Overflow Prevention ---
+        # Clip values to avoid overflow in exp() (exp(709) is approx max float64)
+        Y_pred_log = np.clip(Y_pred_log, -700, 700)
 
         inverse_transform_func = model_bundle.get('inverse_transform_func', 'exp')
         Y_pred_final = np.expm1(Y_pred_log) if inverse_transform_func == 'expm1' else np.exp(Y_pred_log)
@@ -316,6 +337,12 @@ class SurrogateModelPredictor:
                          input_data[feature] = 0.0
                     else:
                         raise ValueError(f"Could not find a value for required input feature: '{feature}' (context unit: {current_unit})")
+        
+        # Ensure no NaNs in the assembled dictionary before creating DataFrame
+        for k, v in input_data.items():
+            if not np.isfinite(v):
+                input_data[k] = 0.0
+                
         return pd.DataFrame([input_data])
 
     def _predict_isolated_cstr(self, model_type: str) -> pd.DataFrame:
@@ -330,7 +357,12 @@ class SurrogateModelPredictor:
         q_raw_inf, q_ext = self._get_dvar_value('Q_raw_inf'), self._get_dvar_value('Q_ext')
         split_unit, split_var_name = 'CSTR1', 'CSTR1_split_internal'
         split_ratio = self._get_dvar_value(split_var_name, unit=split_unit)
-        q_int = (split_ratio * (q_raw_inf + q_ext)) / (1 - split_ratio) if split_ratio < 1.0 else float('inf')
+        
+        # Safety check for division by zero
+        denom = 1 - split_ratio
+        if abs(denom) < 1e-6: denom = 1e-6
+        q_int = (split_ratio * (q_raw_inf + q_ext)) / denom
+        
         extra_vars = {'Q_int': q_int}
         X_cstr = self._assemble_input_df(model_type, 'cstr', self.influent_params, extra_vars=extra_vars, current_unit='CSTR1')
         cstr_predictions = self._predict_with_model(model_type, 'cstr', X_cstr)
@@ -349,7 +381,12 @@ class SurrogateModelPredictor:
         q_raw_inf, q_ext = self._get_dvar_value('Q_raw_inf'), self._get_dvar_value('Q_ext')
         split_unit, split_var_name = 'O3', 'O3_split_internal'
         split_ratio = self._get_dvar_value(split_var_name, unit=split_unit)
-        q_int = (split_ratio * (q_raw_inf + q_ext)) / (1 - split_ratio) if split_ratio < 1.0 else float('inf')
+        
+        # Safety check for division by zero
+        denom = 1 - split_ratio
+        if abs(denom) < 1e-6: denom = 1e-6
+        q_int = (split_ratio * (q_raw_inf + q_ext)) / denom
+        
         extra_vars = {'Q_int': q_int}
         unit_predictions = {}
         for unit in self.full_flow_cstr_units:

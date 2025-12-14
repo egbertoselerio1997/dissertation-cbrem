@@ -9,9 +9,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 from tqdm import tqdm
+import optuna
 
 # --- Scikit-learn and XGBoost Imports ---
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.multioutput import MultiOutputRegressor
@@ -19,6 +20,7 @@ from xgboost import XGBRegressor
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # --- User Input for Process Unit ---
 valid_units = ['clarifier', 'cstr']
@@ -39,9 +41,14 @@ OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, process_unit + '_train_stat.xls
 MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, process_unit + '.joblib')
 IMG_DIR = os.path.join(BASE_OUTPUT_DIR, 'images')
 
+# Hyperparameter Paths
+HYPERPARAM_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'hyperparameters')
+HYPERPARAM_FILE = os.path.join(HYPERPARAM_DIR, 'hyperparameters.xlsx')
+
 # Ensure base directories exist immediately
 os.makedirs(IMG_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+os.makedirs(HYPERPARAM_DIR, exist_ok=True)
 
 # Hyperparameters
 RANDOM_STATE = 42
@@ -78,38 +85,73 @@ def load_and_prepare_data(filepath: str):
 
     return data[x_cols_ordered], data[y_cols], x_cols_ordered, y_cols
 
-# --- Model Training ---
-def train_xgboost_model(X_train: np.ndarray, Y_train: np.ndarray):
-    xgb_reg = XGBRegressor(
-        objective='reg:squarederror',
-        base_score=0.5,
-        booster='gbtree',
-        colsample_bylevel=1,
-        colsample_bynode=1,
-        colsample_bytree=0.3,
-        gamma=0,
-        importance_type='gain',
-        interaction_constraints='',
-        learning_rate=0.1,
-        max_delta_step=0,
-        max_depth=5,
-        min_child_weight=1,
-        missing=np.nan,
-        n_estimators=250,
-        n_jobs=-1,
-        num_parallel_tree=1,
-        random_state=RANDOM_STATE,
-        reg_alpha=10,
-        reg_lambda=1,
-        scale_pos_weight=1,
-        subsample=1,
-        tree_method='exact',
-        validate_parameters=True,
-        verbosity=0
-    )
-    multi_output_model = MultiOutputRegressor(estimator=xgb_reg, n_jobs=-1)
-    multi_output_model.fit(X_train, Y_train)
-    return multi_output_model
+# --- Hyperparameter Optimization ---
+def get_hyperparameters(X_s, Y_s):
+    """
+    Fetches hyperparameters from Excel. If missing, runs Optuna optimization,
+    saves the results, and returns them.
+    """
+    params = {}
+    file_exists = os.path.exists(HYPERPARAM_FILE)
+    
+    if file_exists:
+        try:
+            df_params = pd.read_excel(HYPERPARAM_FILE)
+            required_cols = ['learning_rate', 'n_estimators', 'max_depth', 'min_child_weight', 'gamma', 'subsample', 'colsample_bytree']
+            if all(col in df_params.columns for col in required_cols) and not df_params.empty:
+                params['learning_rate'] = float(df_params['learning_rate'].iloc[0])
+                params['n_estimators'] = int(df_params['n_estimators'].iloc[0])
+                params['max_depth'] = int(df_params['max_depth'].iloc[0])
+                params['min_child_weight'] = int(df_params['min_child_weight'].iloc[0])
+                params['gamma'] = float(df_params['gamma'].iloc[0])
+                params['subsample'] = float(df_params['subsample'].iloc[0])
+                params['colsample_bytree'] = float(df_params['colsample_bytree'].iloc[0])
+                print(f"Loaded hyperparameters from {HYPERPARAM_FILE}")
+                return params
+        except Exception as e:
+            print(f"Error reading hyperparameter file: {e}. Proceeding to optimization.")
+
+    print("Hyperparameters not found or invalid. Starting Optuna optimization...")
+    
+    # Split data for optimization
+    X_train, X_val, Y_train, Y_val = train_test_split(X_s, Y_s, test_size=0.2, random_state=RANDOM_STATE)
+
+    def objective(trial):
+        param = {
+            'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
+            'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+            'gamma': trial.suggest_float('gamma', 0, 0.5),
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+            'objective': 'reg:squarederror',
+            'n_jobs': -1,
+            'random_state': RANDOM_STATE,
+            'verbosity': 0
+        }
+        
+        xgb_reg = XGBRegressor(**param)
+        model = MultiOutputRegressor(estimator=xgb_reg, n_jobs=-1)
+        model.fit(X_train, Y_train)
+        
+        preds = model.predict(X_val)
+        mse = mean_squared_error(Y_val, preds)
+        return mse
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=20, show_progress_bar=True)
+    
+    best_params = study.best_params
+    print("Optimization finished. Best parameters:")
+    print(best_params)
+    
+    # Save to Excel
+    df_best = pd.DataFrame([best_params])
+    df_best.to_excel(HYPERPARAM_FILE, index=False)
+    print(f"Saved optimized hyperparameters to {HYPERPARAM_FILE}")
+    
+    return best_params
 
 # --- Analysis Functions ---
 
@@ -235,8 +277,18 @@ def main():
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
     Y_log = np.log(Y)
 
-    # 2. K-Fold Cross-Validation
-    print(f"\n2. Starting {N_SPLITS}-Fold Cross-Validation...")
+    # Prepare Scaled Data for Optimization
+    sc_x_temp = StandardScaler().fit(X.values)
+    sc_y_temp = StandardScaler().fit(Y_log.values)
+    X_s_temp = sc_x_temp.transform(X.values)
+    Y_s_temp = sc_y_temp.transform(Y_log.values)
+
+    # 2. Get Hyperparameters (Load or Optimize)
+    print("\n2. Fetching Hyperparameters...")
+    hp = get_hyperparameters(X_s_temp, Y_s_temp)
+
+    # 3. K-Fold Cross-Validation
+    print(f"\n3. Starting {N_SPLITS}-Fold Cross-Validation...")
     kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     
     kfold_detailed_results = []
@@ -254,12 +306,19 @@ def main():
         X_te_s = sc_x.transform(X_te.values)
         Y_tr_s = sc_y.transform(Y_tr_log.values)
         
-        # XGBoost Model
+        # XGBoost Model with fetched hyperparameters
         xgb_reg = XGBRegressor(
-            objective='reg:squarederror', base_score=0.5, booster='gbtree',
-            colsample_bytree=0.3, learning_rate=0.1, max_depth=5,
-            n_estimators=250, n_jobs=-1, random_state=RANDOM_STATE,
-            reg_alpha=10, reg_lambda=1, verbosity=0
+            objective='reg:squarederror',
+            learning_rate=hp['learning_rate'],
+            n_estimators=hp['n_estimators'],
+            max_depth=hp['max_depth'],
+            min_child_weight=hp['min_child_weight'],
+            gamma=hp['gamma'],
+            subsample=hp['subsample'],
+            colsample_bytree=hp['colsample_bytree'],
+            n_jobs=-1,
+            random_state=RANDOM_STATE,
+            verbosity=0
         )
         model = MultiOutputRegressor(estimator=xgb_reg, n_jobs=-1)
         model.fit(X_tr_s, Y_tr_s)
@@ -298,8 +357,8 @@ def main():
     print("\nCross-Validation Results (Test Set):")
     print(cv_summary['R2'])
 
-    # 3. Final Model Training
-    print("\n3. Training Final Model...")
+    # 4. Final Model Training
+    print("\n4. Training Final Model...")
     sc_x_final = StandardScaler().fit(X.values)
     sc_y_final = StandardScaler().fit(Y_log.values)
     X_s = sc_x_final.transform(X.values)
@@ -307,17 +366,24 @@ def main():
     
     start_time = time.time()
     xgb_reg = XGBRegressor(
-        objective='reg:squarederror', base_score=0.5, booster='gbtree',
-        colsample_bytree=0.3, learning_rate=0.1, max_depth=5,
-        n_estimators=250, n_jobs=-1, random_state=RANDOM_STATE,
-        reg_alpha=10, reg_lambda=1, verbosity=0
+        objective='reg:squarederror',
+        learning_rate=hp['learning_rate'],
+        n_estimators=hp['n_estimators'],
+        max_depth=hp['max_depth'],
+        min_child_weight=hp['min_child_weight'],
+        gamma=hp['gamma'],
+        subsample=hp['subsample'],
+        colsample_bytree=hp['colsample_bytree'],
+        n_jobs=-1,
+        random_state=RANDOM_STATE,
+        verbosity=0
     )
     final_model = MultiOutputRegressor(estimator=xgb_reg, n_jobs=-1)
     final_model.fit(X_s, Y_s)
     train_time = time.time() - start_time
     print(f"   - Training Time: {train_time:.2f} seconds")
 
-    # 4. Generate Predictions & Plots
+    # 5. Generate Predictions & Plots
     Y_pred_s_full = final_model.predict(X_s)
     Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
     
@@ -327,11 +393,11 @@ def main():
     print("   - Calculating Feature Importance (Permutation)...")
     imp_df = calculate_permutation_importance(final_model, X_s, Y_s, x_cols)
 
-    # 5. Regime Generalization Analysis
+    # 6. Regime Generalization Analysis
     regime_df = analyze_regime_generalization(X, Y, Y_pred_full, x_cols, y_cols)
 
-    # 6. Save Results
-    print(f"\n4. Saving results to {OUTPUT_FILE_PATH}...")
+    # 7. Save Results
+    print(f"\n5. Saving results to {OUTPUT_FILE_PATH}...")
     full_stats = []
     for i, col in enumerate(y_cols):
         mse = mean_squared_error(Y.iloc[:, i], Y_pred_full[:, i])
@@ -352,7 +418,8 @@ def main():
 
     joblib.dump({
         'model': final_model, 'x_scaler': sc_x_final, 'y_scaler': sc_y_final,
-        'x_cols': x_cols, 'y_cols': y_cols
+        'x_cols': x_cols, 'y_cols': y_cols,
+        'hyperparameters': hp
     }, MODEL_PATH)
 
     print("Done.")

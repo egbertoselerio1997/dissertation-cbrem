@@ -515,8 +515,8 @@ class WWTPPlantOptimizer:
 
 if __name__ == "__main__":
 
-    SCALED_VAR_BOUNDS = (-0.5, 0.5)
-    UNSCALED_VAR_BOUNDS = (0.0, 12000.0)
+    SCALED_VAR_BOUNDS = (-1, 1)
+    UNSCALED_VAR_BOUNDS = (0.0, 1e5)
     N_PW_PTS = 50  # Number of breakpoints for the approximation
     PLA_TYPE = 'MC'
     PIECEWISE_SPACING = 2

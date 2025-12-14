@@ -10,6 +10,7 @@ import time
 import matplotlib.pyplot as plt
 import seaborn as sns
 import re
+import optuna
 
 # --- PyTorch Imports ---
 import torch
@@ -23,6 +24,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # --- Configuration & User Input ---
 valid_units = ['clarifier', 'cstr']
@@ -46,16 +48,14 @@ OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, process_unit + '_train_stat.xls
 MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, process_unit + '.joblib')
 IMG_DIR = os.path.join(BASE_OUTPUT_DIR, 'images')
 
+# Hyperparameter Paths
+HYPERPARAM_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'hyperparameters')
+HYPERPARAM_FILE = os.path.join(HYPERPARAM_DIR, 'hyperparameters.xlsx')
+
 # Ensure base directories exist immediately
 os.makedirs(IMG_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-
-# Hyperparameters
-RANDOM_STATE = 42
-NUM_EPOCHS = 3000
-LEARNING_RATE = 1e-3
-BATCH_SIZE = -1
-L1_LAMBDA = 1e-3
+os.makedirs(HYPERPARAM_DIR, exist_ok=True)
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -153,25 +153,25 @@ class CoupledCLEFOModel(nn.Module):
         return Y_pred
 
 # --- Training Logic ---
-def train_model_pytorch(X_train, Y_train, Z_train, epochs=NUM_EPOCHS, verbose=False):
+def train_model_pytorch(X_train, Y_train, Z_train, learning_rate, batch_size, l1_lambda, epochs, verbose=False):
     model = CoupledCLEFOModel(Y_train.shape[1], X_train.shape[1], Z_train.shape[1], solver_type).to(device)
     criterion = nn.MSELoss()
     
-    if optimizer_type == 'adam': opt = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    elif optimizer_type == 'sgd': opt = optim.SGD(model.parameters(), lr=LEARNING_RATE*10, momentum=0.9)
-    elif optimizer_type == 'rmsprop': opt = optim.RMSprop(model.parameters(), lr=LEARNING_RATE)
-    else: opt = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    if optimizer_type == 'adam': opt = optim.Adam(model.parameters(), lr=learning_rate)
+    elif optimizer_type == 'sgd': opt = optim.SGD(model.parameters(), lr=learning_rate*10, momentum=0.9)
+    elif optimizer_type == 'rmsprop': opt = optim.RMSprop(model.parameters(), lr=learning_rate)
+    else: opt = optim.AdamW(model.parameters(), lr=learning_rate)
 
     dataset = WastewaterDataset(X_train, Y_train, Z_train)
     
-    if BATCH_SIZE <= 0:
+    if batch_size <= 0:
         X_g, Y_g, Z_g = dataset.X.to(device), dataset.Y.to(device), dataset.Z.to(device)
         iterator = range(epochs)
         if verbose: iterator = tqdm(iterator, desc="Training")
         
         for _ in iterator:
             Y_pred = model(X_g, Z_g)
-            reg = L1_LAMBDA * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1) + 
+            reg = l1_lambda * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1) + 
                                torch.norm(model.Lambda, 1) + torch.norm(model.Gamma, 1))
             loss = criterion(Y_pred, Y_g) + reg
             
@@ -179,12 +179,15 @@ def train_model_pytorch(X_train, Y_train, Z_train, epochs=NUM_EPOCHS, verbose=Fa
             loss.backward()
             opt.step()
     else:
-        loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-        for _ in range(epochs):
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        iterator = range(epochs)
+        if verbose: iterator = tqdm(iterator, desc="Training")
+        
+        for _ in iterator:
             for X_b, Y_b, Z_b in loader:
                 X_b, Y_b, Z_b = X_b.to(device), Y_b.to(device), Z_b.to(device)
                 loss = criterion(model(X_b, Z_b), Y_b) + \
-                       L1_LAMBDA * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1))
+                       l1_lambda * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1))
                 if torch.isnan(loss): return None
                 opt.zero_grad()
                 loss.backward()
@@ -196,6 +199,69 @@ def predict_pytorch(model, X, Z):
     with torch.no_grad():
         return model(torch.tensor(X, dtype=torch.float32).to(device), 
                      torch.tensor(Z, dtype=torch.float32).to(device)).cpu().numpy()
+
+# --- Hyperparameter Optimization ---
+def get_hyperparameters(X_s, Y_s, Z_s):
+    """
+    Fetches hyperparameters from Excel. If missing, runs Optuna optimization,
+    saves the results, and returns them.
+    """
+    params = {}
+    file_exists = os.path.exists(HYPERPARAM_FILE)
+    
+    if file_exists:
+        try:
+            df_params = pd.read_excel(HYPERPARAM_FILE)
+            # Check if required columns exist and have values
+            required_cols = ['learning_rate', 'batch_size', 'l1_lambda', 'num_epochs']
+            if all(col in df_params.columns for col in required_cols) and not df_params.empty:
+                params['learning_rate'] = float(df_params['learning_rate'].iloc[0])
+                params['batch_size'] = int(df_params['batch_size'].iloc[0])
+                params['l1_lambda'] = float(df_params['l1_lambda'].iloc[0])
+                params['num_epochs'] = int(df_params['num_epochs'].iloc[0])
+                print(f"Loaded hyperparameters from {HYPERPARAM_FILE}")
+                return params
+        except Exception as e:
+            print(f"Error reading hyperparameter file: {e}. Proceeding to optimization.")
+
+    print("Hyperparameters not found or invalid. Starting Optuna optimization...")
+    
+    # Split data for optimization (Train/Val split)
+    X_train, X_val, Y_train, Y_val, Z_train, Z_val = train_test_split(
+        X_s, Y_s, Z_s, test_size=0.2, random_state=42
+    )
+
+    def objective(trial):
+        # Suggest parameters
+        lr = trial.suggest_float('learning_rate', 1e-4, 1e-1, log=True)
+        bs = trial.suggest_categorical('batch_size', [16, 32, 64, 128, -1])
+        l1 = trial.suggest_float('l1_lambda', 1e-5, 1e-2, log=True)
+        epochs = trial.suggest_int('num_epochs', 100, 1000, step=100)
+        
+        # Train model
+        model = train_model_pytorch(X_train, Y_train, Z_train, lr, bs, l1, epochs, verbose=False)
+        
+        if model is None: # Handle NaN loss
+            return float('inf')
+            
+        # Evaluate
+        Y_pred_val = predict_pytorch(model, X_val, Z_val)
+        mse = mean_squared_error(Y_val, Y_pred_val)
+        return mse
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=20, show_progress_bar=True)
+    
+    best_params = study.best_params
+    print("Optimization finished. Best parameters:")
+    print(best_params)
+    
+    # Save to Excel
+    df_best = pd.DataFrame([best_params])
+    df_best.to_excel(HYPERPARAM_FILE, index=False)
+    print(f"Saved optimized hyperparameters to {HYPERPARAM_FILE}")
+    
+    return best_params
 
 # --- Analysis Functions ---
 
@@ -398,9 +464,25 @@ def main():
     Y_log = np.log(Y)
     m = X.shape[1]
 
-    # 2. K-Fold Cross-Validation
-    print(f"\n2. Starting {N_SPLITS}-Fold Cross-Validation...")
-    kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+    # Prepare Scaled Data for Optimization
+    sc_x_temp = StandardScaler().fit(X)
+    sc_y_temp = StandardScaler().fit(Y_log)
+    X_s_temp = sc_x_temp.transform(X)
+    Y_s_temp = sc_y_temp.transform(Y_log)
+    Z_s_temp, _ = create_interaction_features_np(X_s_temp, m)
+
+    # 2. Get Hyperparameters (Load or Optimize)
+    print("\n2. Fetching Hyperparameters...")
+    hp = get_hyperparameters(X_s_temp, Y_s_temp, Z_s_temp)
+    
+    LEARNING_RATE = hp['learning_rate']
+    BATCH_SIZE = int(hp['batch_size'])
+    L1_LAMBDA = hp['l1_lambda']
+    NUM_EPOCHS = int(hp['num_epochs'])
+
+    # 3. K-Fold Cross-Validation
+    print(f"\n3. Starting {N_SPLITS}-Fold Cross-Validation...")
+    kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=42)
     
     # Store detailed results for Excel
     kfold_detailed_results = []
@@ -423,7 +505,7 @@ def main():
         
         model = None
         while model is None:
-            model = train_model_pytorch(X_tr_s, Y_tr_s, Z_tr_s)
+            model = train_model_pytorch(X_tr_s, Y_tr_s, Z_tr_s, LEARNING_RATE, BATCH_SIZE, L1_LAMBDA, NUM_EPOCHS)
             
         # --- Predictions ---
         # Train Set
@@ -472,8 +554,8 @@ def main():
     print("\nCross-Validation Results (Test Set):")
     print(cv_summary['R2'])
 
-    # 3. Final Model Training
-    print("\n3. Training Final Model...")
+    # 4. Final Model Training
+    print("\n4. Training Final Model...")
     sc_x_final = StandardScaler().fit(X)
     sc_y_final = StandardScaler().fit(Y_log)
     X_s = sc_x_final.transform(X)
@@ -483,11 +565,11 @@ def main():
     start_time = time.time()
     final_model = None
     while final_model is None:
-        final_model = train_model_pytorch(X_s, Y_s, Z_s, verbose=True)
+        final_model = train_model_pytorch(X_s, Y_s, Z_s, LEARNING_RATE, BATCH_SIZE, L1_LAMBDA, NUM_EPOCHS, verbose=True)
     train_time = time.time() - start_time
     print(f"   - Training Time: {train_time:.2f} seconds")
 
-    # 4. Generate Predictions & Plots (Final Model)
+    # 5. Generate Predictions & Plots (Final Model)
     Y_pred_s_full = predict_pytorch(final_model, X_s, Z_s)
     Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
     
@@ -499,7 +581,7 @@ def main():
     print("   - Generating Heatmaps...")
     plot_heatmaps(final_model, x_cols, y_cols, col_pairs)
 
-    # 5. Advanced Analysis
+    # 6. Advanced Analysis
     print("   - Analyzing Sparsity...")
     sparsity_df = analyze_sparsity(final_model)
     print(sparsity_df)
@@ -507,11 +589,11 @@ def main():
     print("   - Calculating Feature Importance...")
     imp_df = calculate_feature_importance(final_model, x_cols, col_pairs)
     
-    # 6. Regime Generalization Analysis
+    # 7. Regime Generalization Analysis
     regime_df = analyze_regime_generalization(X, Y, Y_pred_full, x_cols, y_cols)
     
-    # 7. Save Results
-    print(f"\n4. Saving results to {OUTPUT_FILE_PATH}...")
+    # 8. Save Results
+    print(f"\n5. Saving results to {OUTPUT_FILE_PATH}...")
     
     # Prepare stats for full model
     full_stats = []
