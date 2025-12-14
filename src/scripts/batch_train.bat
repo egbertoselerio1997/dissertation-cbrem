@@ -29,20 +29,20 @@ FOR %%F IN ("%SCRIPT_DIR%\*.py") DO (
     echo.
 
     :: --- RUN 1: CSTR ---
-    echo [RUN 1/2] Executing with Process Unit: 'cstr' and Folds: 10
+    echo [RUN 1/2] Executing with Process Unit: 'cstr' and Folds: 5
     (
         echo cstr
-        echo 10
+        echo 5
     ) | python "%%F"
     echo.
     echo [RUN 1/2] Completed for %%~nxF.
     echo.
 
     :: --- RUN 2: CLARIFIER ---
-    echo [RUN 2/2] Executing with Process Unit: 'clarifier' and Folds: 10
+    echo [RUN 2/2] Executing with Process Unit: 'clarifier' and Folds: 5
     (
         echo clarifier
-        echo 10
+        echo 5
     ) | python "%%F"
     echo.
     echo [RUN 2/2] Completed for %%~nxF.

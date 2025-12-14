@@ -5,10 +5,15 @@ import warnings
 import math
 import joblib
 import time
-import matplotlib.pyplot as plt
-import seaborn as sns
 import re
 from tqdm import tqdm
+
+# --- Matplotlib Backend Fix ---
+# Must be set before importing pyplot to prevent "main thread is not in main loop" errors
+import matplotlib
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # --- Scikit-learn Imports ---
 from sklearn.model_selection import KFold

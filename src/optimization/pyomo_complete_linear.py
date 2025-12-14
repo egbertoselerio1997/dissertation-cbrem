@@ -15,7 +15,8 @@ try:
     import torch.nn as nn
 
     class CoupledCLEFOModel(nn.Module):
-        def __init__(self, n_dep, n_indep, n_inter):
+        # Updated signature to match training code (added solver_type)
+        def __init__(self, n_dep, n_indep, n_inter, solver_type='solve'):
             super().__init__()
             self.n_dep, self.Upsilon, self.B, self.Theta, self.Gamma, self.Lambda = [None] * 6
         def forward(self, X, Z):
