@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 import qsdsan as qs
 import pandas as pd
 import numpy as np
@@ -7,6 +9,12 @@ import warnings
 from tqdm import tqdm
 import gc
 from scipy.stats import qmc
+
+# Allow importing shared naming utilities
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+from naming import CONCENTRATION_SUFFIX, canonical_base_name, legacy_identifier  # noqa: E402
 
 # Suppress warnings for a cleaner output
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources is deprecated.*")
@@ -19,6 +27,10 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
     This function is designed to be parallelized.
     """
     try:
+        def formatted_name(prefix: str, compound_id: str) -> str:
+            base = canonical_base_name(compound_id) or compound_id
+            return f"{prefix}_{base}{CONCENTRATION_SUFFIX}"
+
         # --- 1. Get the inputs for the current simulation run ---
         current_inputs = inputs
 
@@ -47,9 +59,13 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
         ext_recycle = qs.WasteStream(f'external_recycle_{sim_id}', T=Temp)
         wastage = qs.WasteStream(f'wastage_{sim_id}', T=Temp)
 
-        influent_concentrations = {
-            key.replace('inf_', ''): value for key, value in current_inputs.items() if key.startswith('inf_')
-        }
+        influent_concentrations = {}
+        for key, value in current_inputs.items():
+            if key.startswith(('inf_', 'influent_')):
+                raw_token = key.split('_', 1)[1]
+                descriptive_base = canonical_base_name(raw_token) or raw_token
+                legacy_id = legacy_identifier(descriptive_base)
+                influent_concentrations[legacy_id] = value
         influent.set_flow_by_concentration(Q_inf, concentrations=influent_concentrations, units=('m3/d', 'mg/L'))
 
         # Add aeration for all CSTRs
@@ -94,7 +110,7 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
         def get_stream_data(stream_obj):
             if stream_obj.F_mass <= 0: return None
             data = {f'{comp_id}': conc for comp_id, conc in zip(stream_obj.components.IDs, stream_obj.conc)}
-            composite_properties = ['COD', 'BOD', 'TN', 'TKN', 'TP', 'TSS', 'VSS']
+            composite_properties = ['COD', 'BOD', 'TN', 'TKN', 'TP', 'TSS', 'VSS', 'TOC', 'TC']
             for prop in composite_properties:
                 getter = getattr(stream_obj, f'get_{prop}', getattr(stream_obj, prop, None))
                 data[prop] = getter() if callable(getter) else getter
@@ -126,7 +142,7 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
         }
         
         all_inf_components = [c for c in cmps.IDs if c not in ['H2O']]
-        composite_properties = ['COD', 'BOD', 'TN', 'TKN', 'TP', 'TSS', 'VSS']
+        composite_properties = ['COD', 'BOD', 'TN', 'TKN', 'TP', 'TSS', 'VSS', 'TOC', 'TC']
         all_out_components = list(all_inf_components) + composite_properties + ['X_MeOH','X_MeP','H2O']
 
         for _, details in units_to_process.items():
@@ -139,14 +155,14 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
                 'Q_was': Q_was, 'Q_ext': Q_ext, 'V': details['V'], 'KLa': details['KLa']
             }
             for comp_id in all_inf_components:
-                input_row[f'inf_{comp_id}'] = in_data.get(comp_id, 0)
+                input_row[formatted_name('influent', comp_id)] = in_data.get(comp_id, 0)
             for prop in composite_properties:
-                input_row[f'inf_{prop}'] = in_data.get(prop, 0)
+                input_row[formatted_name('influent', prop)] = in_data.get(prop, 0)
             cstr_input_rows.append(input_row)
             
             output_row = {'simulation_number': sim_id}
             for comp_id in all_out_components:
-                 output_row[f'Target_Effluent_{comp_id} (mg/L)'] = out_data.get(comp_id, 0)
+                 output_row[formatted_name('effluent', comp_id)] = out_data.get(comp_id, 0)
             cstr_output_rows.append(output_row)
             
         # --- Prepare Clarifier dataset ---
@@ -160,14 +176,14 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
                 'Q_int': Q_int_daily, 'Q_was': Q_was, 'Q_ext': Q_ext
             }
             for comp_id in all_inf_components:
-                clarifier_input_row[f'inf_{comp_id}'] = c1_in_data.get(comp_id, 0)
+                clarifier_input_row[formatted_name('influent', comp_id)] = c1_in_data.get(comp_id, 0)
             for prop in composite_properties:
-                clarifier_input_row[f'inf_{prop}'] = c1_in_data.get(prop, 0)
+                clarifier_input_row[formatted_name('influent', prop)] = c1_in_data.get(prop, 0)
             
             clarifier_output_row = {'simulation_number': sim_id}
             for comp in all_out_components:
-                clarifier_output_row[f'Target_Effluent_{comp} (mg/L)'] = c1_eff_data.get(comp, 0)
-                clarifier_output_row[f'Target_Wastage_{comp} (mg/L)'] = c1_was_data.get(comp, 0)
+                clarifier_output_row[formatted_name('effluent', comp)] = c1_eff_data.get(comp, 0)
+                clarifier_output_row[formatted_name('wastage', comp)] = c1_was_data.get(comp, 0)
         
         # --- Prepare Flows dataset ---
         flows_row = {
@@ -190,9 +206,10 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
         qs.main_flowsheet.clear()
 
 def run_simulation():
-    data_dir = 'data'
-    data_filepath = os.path.join(data_dir, 'data.xlsx')
-    backup_dir = os.path.join(data_dir, 'simulation_backup')
+    config_dir = os.path.join('data', 'config')
+    data_filepath = os.path.join(config_dir, 'data.xlsx')
+    backup_dir = os.path.join('data', 'results', 'simulation', 'backup')
+    os.makedirs(config_dir, exist_ok=True)
     os.makedirs(backup_dir, exist_ok=True)
 
     print(f"Loading input variables from {data_filepath}...")
@@ -319,11 +336,11 @@ def run_simulation():
 
     print("Simulations complete. Merging new data with existing results and saving...")
     
-    # --- Define final column order based on user request ---
-    inf_cols = ['inf_S_I', 'inf_X_I', 'inf_S_F', 'inf_S_A', 'inf_X_S', 'inf_S_NH4', 'inf_S_O2', 'inf_S_N2', 'inf_S_NO3', 'inf_S_PO4', 'inf_X_PP', 'inf_X_PHA', 'inf_X_H', 'inf_X_AUT', 'inf_X_PAO', 'inf_S_ALK', 'inf_X_MeOH', 'inf_X_MeP']
-    composite_cols = ['inf_COD', 'inf_BOD', 'inf_TN', 'inf_TKN', 'inf_TP', 'inf_TSS', 'inf_VSS']
-    inf_cols.extend(composite_cols)
-    inf_cols.sort()
+    # --- Define final column order based on generated data ---
+    inflow_keys = set()
+    for row in all_input_cstr_rows + all_input_clarifier_rows:
+        inflow_keys.update(k for k in row.keys() if k.startswith('influent_'))
+    inf_cols = sorted(inflow_keys)
 
     final_cstr_cols = ['simulation_number', 'Q_raw_inf', 'Q_int', 'Q_was', 'Q_ext', 'V', 'KLa'] + inf_cols
     final_clarifier_cols = ['simulation_number', 'Q_raw_inf', 'C1_surface_area', 'C1_height', 'Q_int', 'Q_was', 'Q_ext'] + inf_cols

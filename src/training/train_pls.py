@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import os
+import sys
+from pathlib import Path
 import warnings
 import math
 import joblib
@@ -21,6 +23,11 @@ from sklearn.cross_decomposition import PLSRegression
 warnings.filterwarnings('ignore')
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+from naming import canonical_base_name, normalize_stream_column, rename_concentration_columns
+
 # --- User Input for Process Unit ---
 valid_units = ['clarifier', 'cstr']
 process_unit = input(f"Enter process unit type {valid_units}: ").lower().strip()
@@ -33,15 +40,16 @@ except ValueError:
     N_SPLITS = 10
 
 # Paths
-FILE_PATH = os.path.join('data', 'data.xlsx')
+CONFIG_DIR = os.path.join('data', 'config')
+FILE_PATH = os.path.join(CONFIG_DIR, 'data.xlsx')
 MACHINE_LEARNING_MODEL = 'pls'
-BASE_OUTPUT_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'training_stat_' + process_unit)
-OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, process_unit + '_train_stat.xlsx')
-MODEL_PATH = os.path.join('models', MACHINE_LEARNING_MODEL, process_unit, process_unit + '.joblib')
+BASE_OUTPUT_DIR = os.path.join('data', 'results', 'training', MACHINE_LEARNING_MODEL, process_unit)
+OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, 'train_stat.xlsx')
+MODEL_PATH = os.path.join(BASE_OUTPUT_DIR, f'{process_unit}.joblib')
 IMG_DIR = os.path.join(BASE_OUTPUT_DIR, 'images')
 
 # Hyperparameter Paths
-HYPERPARAM_DIR = os.path.join('data', 'training_data', MACHINE_LEARNING_MODEL, 'hyperparameters')
+HYPERPARAM_DIR = os.path.join('data', 'results', 'training', MACHINE_LEARNING_MODEL, 'hyperparameters')
 HYPERPARAM_FILE = os.path.join(HYPERPARAM_DIR, 'hyperparameters.xlsx')
 
 # Ensure base directories exist immediately
@@ -57,13 +65,15 @@ def load_and_prepare_data(filepath: str):
     print("1. Loading data...")
     df_input = pd.read_excel(filepath, sheet_name="all_input_" + process_unit)
     df_output = pd.read_excel(filepath, sheet_name="all_output_" + process_unit)
+    df_output = rename_concentration_columns(df_output)
 
     if {'variable', 'default'}.issubset(df_input.columns):
+        df_input['variable'] = df_input['variable'].apply(normalize_stream_column)
         df_input_wide = df_input.pivot(index='simulation_number', columns='variable', values='default').reset_index()
         input_cols = df_input['variable'].unique().tolist()
     else:
-        df_input_wide = df_input
-        input_cols = [col for col in df_input.columns if col != 'simulation_number']
+        df_input_wide = rename_concentration_columns(df_input)
+        input_cols = [col for col in df_input_wide.columns if col != 'simulation_number']
 
     data = pd.merge(df_input_wide, df_output, on='simulation_number', how='inner')
     
@@ -71,15 +81,16 @@ def load_and_prepare_data(filepath: str):
         df_comps = pd.read_excel(filepath, sheet_name="training_components")
         if 'considered' in df_comps.columns:
             remove = df_comps[df_comps['considered'] == 0]['components'].tolist()
-            cols_to_drop = [c for c in data.columns if any(r in c for r in remove)]
+            removal_tokens = [canonical_base_name(r) or r for r in remove]
+            cols_to_drop = [c for c in data.columns if any(token in c for token in removal_tokens)]
             data.drop(columns=cols_to_drop, inplace=True, errors='ignore')
     except:
         pass
 
-    y_cols = [col for col in data.columns if col.startswith('Target_')]
+    y_cols = [col for col in data.columns if col.startswith(('effluent_', 'wastage_'))]
     current_inputs = [col for col in data.columns if col in input_cols]
-    inf_cols = sorted([c for c in current_inputs if c.startswith('inf_')])
-    proc_cols = sorted([c for c in current_inputs if not c.startswith('inf_')])
+    inf_cols = sorted([c for c in current_inputs if c.startswith('influent_')])
+    proc_cols = sorted([c for c in current_inputs if not c.startswith('influent_')])
     x_cols_ordered = proc_cols + inf_cols
 
     return data[x_cols_ordered], data[y_cols], x_cols_ordered, y_cols

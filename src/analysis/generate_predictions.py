@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import joblib
@@ -120,6 +121,11 @@ except ImportError:
     class xgb:
         class XGBRegressor: pass
 
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+from naming import CONCENTRATION_SUFFIX, normalize_stream_column, rename_concentration_columns, strip_prefix_and_units
+
 
 class SurrogateModelPredictor:
     """
@@ -155,15 +161,8 @@ class SurrogateModelPredictor:
         return Z
 
     def _unify_comp_name(self, name: str) -> str:
-        """Normalizes component names to a base form."""
-        if name.startswith('inf_'):
-            return name[4:]
-        if 'Target' in name:
-            base = name.split('(')[0].strip()
-            for prefix in ['Target_Effluent_', 'Target_Wastage_']:
-                if base.startswith(prefix):
-                    return base.replace(prefix, '')
-        return name
+        """Return the descriptive base compound name without stream or unit tags."""
+        return strip_prefix_and_units(name)
 
     def _load_data_and_models(self):
         """Loads surrogate models, scalers, and data from optimization outputs."""
@@ -174,20 +173,31 @@ class SurrogateModelPredictor:
             print(f"   - Loading {model_type.upper()} models...")
             is_valid_model = True
             for unit_type in ['cstr', 'clarifier']:
-                model_path = os.path.join('models', model_type, unit_type, f'{unit_type}.joblib')
+                model_path = os.path.join('data', 'results', 'training', model_type, unit_type, f'{unit_type}.joblib')
                 if not os.path.exists(model_path):
                     print(f"     - WARNING: Model file not found for '{model_type}/{unit_type}' at '{model_path}'. Skipping this model.")
                     is_valid_model = False
                     break
                 try:
                     model_bundle = joblib.load(model_path)
+                    x_features = []
+                    y_features = []
+                    if hasattr(model_bundle.get('x_scaler'), 'feature_names_in_'):
+                        raw_x = list(model_bundle['x_scaler'].feature_names_in_)
+                        x_features = [normalize_stream_column(name) for name in raw_x]
+                        model_bundle['x_scaler'].feature_names_in_ = np.array(x_features)
+                    if hasattr(model_bundle.get('y_scaler'), 'feature_names_in_'):
+                        raw_y = list(model_bundle['y_scaler'].feature_names_in_)
+                        y_features = [normalize_stream_column(name) for name in raw_y]
+                        model_bundle['y_scaler'].feature_names_in_ = np.array(y_features)
+
                     self.models[model_type][unit_type] = model_bundle
                     print(f"     - Loaded '{unit_type}' model from '{model_path}'")
-                    if not self.feature_names[unit_type].get('x') and hasattr(model_bundle['x_scaler'], 'feature_names_in_'):
-                        self.feature_names[unit_type]['x'] = list(model_bundle['x_scaler'].feature_names_in_)
+                    if not self.feature_names[unit_type].get('x') and x_features:
+                        self.feature_names[unit_type]['x'] = x_features
                         print(f"     - Captured X feature names for '{unit_type}' from '{model_type}' model.")
-                    if not self.feature_names[unit_type].get('y') and hasattr(model_bundle['y_scaler'], 'feature_names_in_'):
-                        self.feature_names[unit_type]['y'] = list(model_bundle['y_scaler'].feature_names_in_)
+                    if not self.feature_names[unit_type].get('y') and y_features:
+                        self.feature_names[unit_type]['y'] = y_features
                         print(f"     - Captured Y feature names for '{unit_type}' from '{model_type}' model.")
                 except Exception as e:
                     print(f"     - ERROR: Failed to load model file '{model_path}'. Reason: {e}. Skipping this model.")
@@ -207,7 +217,12 @@ class SurrogateModelPredictor:
             raise FileNotFoundError(f"Configuration file not found at '{self.config_path}'")
         xls_config = pd.read_excel(self.config_path, sheet_name=None)
         df_influent = xls_config['raw_influent_compound_conc']
-        self.influent_params = pd.Series(df_influent.Value.values, index=df_influent.Variable).to_dict()
+        raw_influent = pd.Series(df_influent.Value.values, index=df_influent.Variable).to_dict()
+        self.influent_params = {}
+        for key, value in raw_influent.items():
+            prefixed = key if key.startswith(('inf_', 'influent_')) else f"inf_{key}"
+            normalized = normalize_stream_column(prefixed)
+            self.influent_params[normalized] = value
         
         df_dvar_config = xls_config['decision_var']
         self.cstr_dvars_list = df_dvar_config[df_dvar_config['Process Unit'] == 'cstr']['I_variables'].tolist()
@@ -280,6 +295,7 @@ class SurrogateModelPredictor:
         Y_pred_final = np.expm1(Y_pred_log) if inverse_transform_func == 'expm1' else np.exp(Y_pred_log)
 
         pred_df = pd.DataFrame(Y_pred_final, columns=y_features)
+        pred_df = rename_concentration_columns(pred_df)
         return pred_df
 
     def run_predictions(self, optimization_target: str):
@@ -320,7 +336,7 @@ class SurrogateModelPredictor:
         """
         if extra_vars is None: extra_vars = {}
         scaler_features = self.feature_names[unit_type]['x']
-        input_data = {}
+        input_data = {feat: 0.0 for feat in scaler_features}
         for feature in scaler_features:
             if feature in extra_vars:
                 input_data[feature] = extra_vars[feature]
@@ -338,12 +354,11 @@ class SurrogateModelPredictor:
                     else:
                         raise ValueError(f"Could not find a value for required input feature: '{feature}' (context unit: {current_unit})")
         
-        # Ensure no NaNs in the assembled dictionary before creating DataFrame
         for k, v in input_data.items():
             if not np.isfinite(v):
                 input_data[k] = 0.0
-                
-        return pd.DataFrame([input_data])
+
+        return pd.DataFrame([input_data])[scaler_features]
 
     def _predict_isolated_cstr(self, model_type: str) -> pd.DataFrame:
         """Handles the single CSTR unit scenario for a given model type."""
@@ -366,18 +381,18 @@ class SurrogateModelPredictor:
         extra_vars = {'Q_int': q_int}
         X_cstr = self._assemble_input_df(model_type, 'cstr', self.influent_params, extra_vars=extra_vars, current_unit='CSTR1')
         cstr_predictions = self._predict_with_model(model_type, 'cstr', X_cstr)
-        clarifier_influent = {f"inf_{self._unify_comp_name(c)}": v for c, v in cstr_predictions.iloc[0].to_dict().items()}
+        clarifier_influent = {f"influent_{self._unify_comp_name(c)}{CONCENTRATION_SUFFIX}": v for c, v in cstr_predictions.iloc[0].to_dict().items()}
         X_clarifier = self._assemble_input_df(model_type, 'clarifier', clarifier_influent, extra_vars=extra_vars, current_unit='C1')
         clarifier_predictions = self._predict_with_model(model_type, 'clarifier', X_clarifier)
         output_data = [{'Component': f"{self._unify_comp_name(c)}_CSTR1", 'Predicted Value (mg/L)': v} for c, v in cstr_predictions.iloc[0].to_dict().items()]
         for col, val in clarifier_predictions.iloc[0].to_dict().items():
-            stream = 'Effluent' if 'Effluent' in col else 'Wastage'
+            stream = 'Effluent' if col.startswith('effluent_') else 'Wastage'
             output_data.append({'Component': f"{self._unify_comp_name(col)}_{stream}",'Predicted Value (mg/L)': val})
         return pd.DataFrame(output_data)
 
     def _predict_aao_plant(self, model_type: str) -> pd.DataFrame:
         """Handles the full AAO plant scenario by sequential prediction for a given model type."""
-        stream_concs = {r['Component']: r['Predicted Value (mg/L)'] for _, r in pd.read_excel(self.results_path, sheet_name='optimal_predicted_effluent').iterrows()}
+        stream_concs = {strip_prefix_and_units(r['Component']): r['Predicted Value (mg/L)'] for _, r in pd.read_excel(self.results_path, sheet_name='optimal_predicted_effluent').iterrows()}
         q_raw_inf, q_ext = self._get_dvar_value('Q_raw_inf'), self._get_dvar_value('Q_ext')
         split_unit, split_var_name = 'O3', 'O3_split_internal'
         split_ratio = self._get_dvar_value(split_var_name, unit=split_unit)
@@ -394,13 +409,13 @@ class SurrogateModelPredictor:
                 q_total = q_raw_inf + q_int + q_ext
                 cstr_x_features = self.feature_names['cstr']['x']
                 current_influent = {feat: (self.influent_params.get(feat, 0) * q_raw_inf + stream_concs.get(f"{self._unify_comp_name(feat)}_O3", 0) * q_int + stream_concs.get(f"{self._unify_comp_name(feat)}_Wastage", 0) * q_ext) / q_total if q_total > 0 else 0
-                                  for feat in cstr_x_features if feat.startswith('inf_')}
+                                  for feat in cstr_x_features if feat.startswith('influent_')}
             else:
                 prev_unit = self.full_flow_cstr_units[self.full_flow_cstr_units.index(unit) - 1]
-                current_influent = {f"inf_{self._unify_comp_name(c)}": v for c, v in unit_predictions[prev_unit].iloc[0].to_dict().items()}
+                current_influent = {f"influent_{self._unify_comp_name(c)}{CONCENTRATION_SUFFIX}": v for c, v in unit_predictions[prev_unit].iloc[0].to_dict().items()}
             X_unit = self._assemble_input_df(model_type, 'cstr', current_influent, extra_vars=extra_vars, current_unit=unit)
             unit_predictions[unit] = self._predict_with_model(model_type, 'cstr', X_unit)
-        clarifier_influent = {f"inf_{self._unify_comp_name(c)}": v for c, v in unit_predictions['O3'].iloc[0].to_dict().items()}
+        clarifier_influent = {f"influent_{self._unify_comp_name(c)}{CONCENTRATION_SUFFIX}": v for c, v in unit_predictions['O3'].iloc[0].to_dict().items()}
         X_clarifier = self._assemble_input_df(model_type, 'clarifier', clarifier_influent, extra_vars=extra_vars, current_unit='C1')
         unit_predictions['C1'] = self._predict_with_model(model_type, 'clarifier', X_clarifier)
         output_data = []
@@ -444,9 +459,9 @@ if __name__ == "__main__":
             print(f"Invalid choice '{user_choice}'. Please run again.", file=sys.stderr)
             sys.exit(1)
         target = choice_map[user_choice]
-        CONFIG_FILE = os.path.join('data', 'optimization_config.xlsx')
-        RESULTS_FILE = os.path.join('data', 'optimization_results.xlsx')
-        PREDICTION_OUTPUT_FILE = os.path.join('data', 'surrogate_predictions', target, 'surrogate_model_predictions.xlsx')
+        CONFIG_FILE = os.path.join('data', 'config', 'optimization_config.xlsx')
+        RESULTS_FILE = os.path.join('data', 'results', 'optimization', target, 'optimization_results.xlsx')
+        PREDICTION_OUTPUT_FILE = os.path.join('data', 'results', 'analysis', 'generate_predictions', target, 'surrogate_model_predictions.xlsx')
         predictor = SurrogateModelPredictor(config_path=CONFIG_FILE, results_path=RESULTS_FILE)
         final_predictions_dict = predictor.run_predictions(optimization_target=target)
         predictor.save_results(final_predictions_dict, output_path=PREDICTION_OUTPUT_FILE)

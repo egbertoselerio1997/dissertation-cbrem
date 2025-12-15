@@ -29,12 +29,13 @@ TARGET_SHEETS = [
     'Final_Model_Stats',
     'Feature_Importance',
     'Comp_Cost',
-    'Regime_Analysis'
+    'Regime_Analysis',
+    'Hyperparameters'
 ]
 
 # Paths
-BASE_DIR = os.path.join('data', 'training_data')
-OUTPUT_FILE = os.path.join(BASE_DIR, 'training_result_compilation.xlsx')
+BASE_DIR = os.path.join('data', 'results', 'training')
+OUTPUT_FILE = os.path.join('data', 'results', 'analysis', 'training_result_compilation.xlsx')
 
 def flatten_multiindex_columns(df):
     """
@@ -56,6 +57,7 @@ def flatten_multiindex_columns(df):
 def main():
     print("Starting Training Result Aggregation...")
     print(f"Looking for data in: {BASE_DIR}")
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
     # Dictionary to hold lists of dataframes for each sheet type
     aggregated_data = {sheet: [] for sheet in TARGET_SHEETS}
@@ -66,8 +68,9 @@ def main():
     for unit in UNITS:
         for model in MODELS:
             # Construct the expected path based on the previous scripts' logic
-            # Path: data/training_data/{MODEL}/training_stat_{UNIT}/{UNIT}_train_stat.xlsx
-            file_path = os.path.join(BASE_DIR, model, f'training_stat_{unit}', f'{unit}_train_stat.xlsx')
+            # Path: data/results/training/{MODEL}/{UNIT}/train_stat.xlsx
+            file_path = os.path.join(BASE_DIR, model, unit, 'train_stat.xlsx')
+            hyperparam_path = os.path.join(BASE_DIR, model, 'hyperparameters', 'hyperparameters.xlsx')
 
             if os.path.exists(file_path):
                 print(f"Processing: {model.upper()} - {unit.upper()}")
@@ -105,6 +108,18 @@ def main():
                             # Regime Analysis might not exist for all models/datasets if KLa is missing
                             if sheet_name != 'Regime_Analysis': 
                                 print(f"  [Warning] Sheet '{sheet_name}' missing in {file_path}")
+
+                    # Handle Hyperparameters separately (shared per model; include unit tag for clarity)
+                    if os.path.exists(hyperparam_path):
+                        try:
+                            df_hp = pd.read_excel(hyperparam_path, sheet_name=0)
+                            df_hp.insert(0, 'Unit', unit.upper())
+                            df_hp.insert(0, 'Model', 'CBRE' if model == 'clefo' else model.upper())
+                            aggregated_data['Hyperparameters'].append(df_hp)
+                        except Exception as e:
+                            print(f"  [Error] Failed to read hyperparameters for {model.upper()} at {hyperparam_path}: {e}")
+                    else:
+                        print(f"  [Warning] Hyperparameters not found for {model.upper()} at {hyperparam_path}")
 
                 except Exception as e:
                     print(f"  [Error] Failed to read {file_path}: {e}")

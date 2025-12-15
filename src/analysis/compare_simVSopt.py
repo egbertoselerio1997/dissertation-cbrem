@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 import qsdsan as qs
 import pandas as pd
 import numpy as np
@@ -10,6 +12,11 @@ import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+from naming import CONCENTRATION_SUFFIX, legacy_identifier, normalize_stream_column, strip_prefix_and_units
 
 # --- Plotting Configuration ---
 COMPONENT_MAP = { # Symbol: Readable Name
@@ -133,7 +140,7 @@ def generate_treatment_train_plots(sim_type, stages, stage_names, predicted_df):
 
     # --- Load additional surrogate model predictions ---
     other_surrogates_data = {}
-    surrogate_predictions_path = os.path.join('data', 'surrogate_predictions', sim_type, 'surrogate_model_predictions.xlsx')
+    surrogate_predictions_path = os.path.join('data', 'results', 'analysis', 'generate_predictions', sim_type, 'surrogate_model_predictions.xlsx')
     try:
         if os.path.exists(surrogate_predictions_path):
             other_surrogates_data = pd.read_excel(surrogate_predictions_path, sheet_name=None)
@@ -239,7 +246,7 @@ def load_simple_inputs(filepath: str):
         print("   - Loaded optimal decision variables.")
         
         df_influent = xls['default_influent_quality']
-        influent_inputs = {f"inf_{k}": v for k, v in df_influent.set_index('Variable')['Value (mg/L)'].to_dict().items()}
+        influent_inputs = {normalize_stream_column(f"inf_{k}"): v for k, v in df_influent.set_index('Variable')['Value (mg/L)'].to_dict().items()}
         print("   - Loaded default influent concentrations.")
         
         df_predicted_effluent = xls['optimal_predicted_effluent']
@@ -280,7 +287,7 @@ def load_aao_inputs(optimization_filepath: str, initial_cond_filepath: str):
         print("   - Loaded optimal decision variables.")
 
         df_influent = xls_opt['default_influent_quality']
-        influent_inputs = {f"inf_{k}": v for k, v in df_influent.set_index('Variable')['Value (mg/L)'].to_dict().items()}
+        influent_inputs = {normalize_stream_column(f"inf_{k}"): v for k, v in df_influent.set_index('Variable')['Value (mg/L)'].to_dict().items()}
         print("   - Loaded default influent concentrations.")
 
         df_predicted_effluent = xls_opt['optimal_predicted_effluent']
@@ -315,7 +322,7 @@ def run_single_cstr_simulation(inputs: dict, sim_type: str, enable_plotting: boo
     try:
         cmps = qs.processes.create_asm2d_cmps(); qs.set_thermo(cmps)
         
-        all_influent_data = {k.replace('inf_', ''): v for k, v in inputs.items() if k.startswith('inf_')}
+        all_influent_data = {legacy_identifier(strip_prefix_and_units(k)): v for k, v in inputs.items() if k.startswith('influent_')}
         valid_component_ids = cmps.IDs
         influent_concentrations = {key: value for key, value in all_influent_data.items() if key in valid_component_ids}
 
@@ -359,7 +366,7 @@ def run_as_plant_simulation(inputs: dict, sim_type: str, init_cond_df: pd.DataFr
         influent, effluent, int_recycle, ext_recycle, wastage = (qs.WasteStream(ID, T=Temp) for ID in 
             ['influent_validation', 'effluent_validation', 'internal_recycle_validation', 'external_recycle_validation', 'wastage_validation'])
         
-        all_influent_data = {k.replace('inf_', ''): v for k, v in inputs.items() if k.startswith('inf_')}
+        all_influent_data = {legacy_identifier(strip_prefix_and_units(k)): v for k, v in inputs.items() if k.startswith('influent_')}
         valid_component_ids = cmps.IDs
         influent_concentrations = {key: value for key, value in all_influent_data.items() if key in valid_component_ids}
         influent.set_flow_by_concentration(Q_inf, concentrations=influent_concentrations, units=('m3/d', 'mg/L'))
@@ -430,7 +437,7 @@ def run_full_aao_simulation(inputs: dict, sim_type: str, init_cond_df: pd.DataFr
         influent, effluent, int_recycle, ext_recycle, wastage = (qs.WasteStream(ID, T=Temp) for ID in 
             ['influent_validation', 'effluent_validation', 'internal_recycle_validation', 'external_recycle_validation', 'wastage_validation'])
         
-        all_influent_data = {k.replace('inf_', ''): v for k, v in inputs.items() if k.startswith('inf_')}
+        all_influent_data = {legacy_identifier(strip_prefix_and_units(k)): v for k, v in inputs.items() if k.startswith('influent_')}
         valid_component_ids = cmps.IDs
         influent_concentrations = {key: value for key, value in all_influent_data.items() if key in valid_component_ids}
 
@@ -523,7 +530,7 @@ def display_comparison_report(predicted_df: pd.DataFrame, simulated_dict: dict):
     else: print("\nConclusion: Moderate to poor agreement. The surrogate model shows deviation.")
 
 def run_cstr_validation(sim_type: str, enable_plotting: bool):
-    data_filepath = os.path.join('data', 'optimization_results.xlsx')
+    data_filepath = os.path.join('data', 'results', 'optimization', 'cstr', 'optimization_results.xlsx')
     try:
         optimal_inputs, predicted_df = load_simple_inputs(data_filepath)
         simulated_concs, raw_influent = run_single_cstr_simulation(optimal_inputs, sim_type, enable_plotting)
@@ -538,8 +545,8 @@ def run_cstr_validation(sim_type: str, enable_plotting: bool):
         print(f"\nVALIDATION FAILED: {e}")
 
 def run_cstr_and_clarifier_validation(sim_type: str, enable_plotting: bool):
-    optimization_filepath = os.path.join('data', 'optimization_results.xlsx')
-    initial_cond_filepath = os.path.join('data', 'data.xlsx')
+    optimization_filepath = os.path.join('data', 'results', 'optimization', 'cstr_and_clarifier', 'optimization_results.xlsx')
+    initial_cond_filepath = os.path.join('data', 'config', 'data.xlsx')
     try:
         optimal_inputs, predicted_df, init_cond_df = load_aao_inputs(optimization_filepath, initial_cond_filepath)
         simulated_results, raw_influent = run_as_plant_simulation(
@@ -558,8 +565,8 @@ def run_cstr_and_clarifier_validation(sim_type: str, enable_plotting: bool):
         print(f"\nAN UNEXPECTED ERROR OCCURRED: {e}"); traceback.print_exc()
 
 def run_aao_validation(sim_type: str, enable_plotting: bool):
-    optimization_filepath = os.path.join('data', 'optimization_results.xlsx')
-    initial_cond_filepath = os.path.join('data', 'data.xlsx')
+    optimization_filepath = os.path.join('data', 'results', 'optimization', 'aao', 'optimization_results.xlsx')
+    initial_cond_filepath = os.path.join('data', 'config', 'data.xlsx')
     try:
         optimal_inputs, predicted_df, init_cond_df = load_aao_inputs(optimization_filepath, initial_cond_filepath)
         simulated_results, raw_influent = run_full_aao_simulation(

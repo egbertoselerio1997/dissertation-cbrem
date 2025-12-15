@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+import sys
+from pathlib import Path
 import itertools
 import warnings
 import re
@@ -38,6 +40,11 @@ except ImportError:
         def __init__(self, *args, **kwargs):
             pass
 
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+from naming import canonical_base_name, normalize_stream_column, rename_concentration_columns
+
 # Suppress openpyxl warnings for a cleaner output.
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -59,6 +66,7 @@ def get_feature_and_target_names(filepath: str, process_unit: str):
     try:
         df_input = pd.read_excel(filepath, sheet_name=f"all_input_{process_unit}")
         df_output = pd.read_excel(filepath, sheet_name=f"all_output_{process_unit}")
+        df_output = rename_concentration_columns(df_output)
     except FileNotFoundError:
         print(f"Error: The data file was not found at '{filepath}'")
         return None, None
@@ -75,27 +83,29 @@ def get_feature_and_target_names(filepath: str, process_unit: str):
         pass
 
     if {'variable', 'default'}.issubset(df_input.columns):
+        df_input['variable'] = df_input['variable'].apply(normalize_stream_column)
         input_cols = df_input['variable'].unique().tolist()
         df_input_wide = df_input.pivot(index='simulation_number', columns='variable', values='default').reset_index()
     else:
-        input_cols = [col for col in df_input.columns if col != 'simulation_number']
-        df_input_wide = df_input
+        df_input_wide = rename_concentration_columns(df_input)
+        input_cols = [col for col in df_input_wide.columns if col != 'simulation_number']
 
     data = pd.merge(df_input_wide, df_output, on='simulation_number', how='inner')
     
-    y_cols_all = [col for col in data.columns if col.startswith('Target_')]
+    y_cols_all = [col for col in data.columns if col.startswith(('effluent_', 'wastage_'))]
     
     if components_to_remove:
         cols_to_drop = []
         for comp in components_to_remove:
-            cols_to_drop.extend([c for c in input_cols if comp in c])
-            cols_to_drop.extend([c for c in y_cols_all if comp in c])
+            base_token = canonical_base_name(comp) or comp
+            cols_to_drop.extend([c for c in input_cols if base_token in c])
+            cols_to_drop.extend([c for c in y_cols_all if base_token in c or comp in c])
         data.drop(columns=cols_to_drop, inplace=True, errors='ignore')
 
-    y_cols = [col for col in data.columns if col.startswith('Target_')]
+    y_cols = [col for col in data.columns if col.startswith(('effluent_', 'wastage_'))]
     current_input_cols = [col for col in data.columns if col in input_cols]
-    inf_cols = sorted([col for col in current_input_cols if col.startswith('inf_')])
-    proc_cols = sorted([col for col in current_input_cols if not col.startswith('inf_')])
+    inf_cols = sorted([col for col in current_input_cols if col.startswith('influent_')])
+    proc_cols = sorted([col for col in current_input_cols if not col.startswith('influent_')])
     x_cols_ordered = proc_cols + inf_cols
 
     if not x_cols_ordered or not y_cols:
@@ -118,8 +128,8 @@ def analyze_model_coefficients():
         if process_unit not in valid_units:
             print(f"Invalid input. Please enter one of {valid_units}.")
 
-    MODEL_PATH = os.path.join('models', 'clefo', process_unit, f'{process_unit}.joblib')
-    DATA_FILE_PATH = os.path.join('data', 'data.xlsx')
+    MODEL_PATH = os.path.join('data', 'results', 'training', 'clefo', process_unit, f'{process_unit}.joblib')
+    DATA_FILE_PATH = os.path.join('data', 'config', 'data.xlsx')
     
     # The output Excel file will be saved in the same directory as the model.
     model_directory = os.path.dirname(MODEL_PATH)

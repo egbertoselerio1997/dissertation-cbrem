@@ -1,10 +1,12 @@
 import os
 import sys
+from pathlib import Path
 import pyomo.environ as pyo
 import pandas as pd
 import joblib
 import itertools
 import traceback
+import numpy as np
 
 # --- PyTorch Class Definition (Required for loading the joblib file) ---
 # This is a placeholder required by joblib to unpickle the model file.
@@ -23,6 +25,11 @@ except ImportError:
     # If torch is not installed, provide a dummy class.
     print("Warning: PyTorch not found. A dummy class will be used for model unpickling.")
     class CoupledCLEFOModel: pass
+
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+from naming import CONCENTRATION_SUFFIX, normalize_stream_column, strip_prefix_and_units
 
 
 class WWTPPlantOptimizer:
@@ -50,15 +57,7 @@ class WWTPPlantOptimizer:
 
     def _unify_comp_name(self, name: str) -> str:
         """Normalizes component names from various sources to a base name."""
-        if name.startswith('inf_'):
-            return name[4:]
-        if 'Target' in name:
-            base = name.split('(')[0].strip()
-            # Handle specific stream prefixes
-            for prefix in ['Target_Effluent_', 'Target_Wastage_']:
-                if base.startswith(prefix):
-                    return base.replace(prefix, '')
-        return name
+        return strip_prefix_and_units(name)
 
     def _load_configuration(self):
         """Loads all data from the Excel configuration file."""
@@ -82,11 +81,23 @@ class WWTPPlantOptimizer:
             path_row = df_config[df_config['Process Unit'] == unit_type]
             if path_row.empty: raise ValueError(f"No model path for '{unit_type}' in 'config' sheet.")
             model_path = path_row['Value'].iloc[0]
-            if not os.path.exists(model_path): raise FileNotFoundError(f"Surrogate model not found: {model_path}")
+            if not os.path.exists(model_path):
+                alt_model_path = model_path.replace('models', os.path.join('data', 'results', 'training'))
+                if os.path.exists(alt_model_path):
+                    model_path = alt_model_path
+                else:
+                    raise FileNotFoundError(f"Surrogate model not found: {model_path}")
             
             model_bundle = joblib.load(model_path)
+            x_scaler = model_bundle['x_scaler']
+            y_scaler = model_bundle['y_scaler']
+            if hasattr(x_scaler, 'feature_names_in_'):
+                x_scaler.feature_names_in_ = np.array([normalize_stream_column(n) for n in x_scaler.feature_names_in_])
+            if hasattr(y_scaler, 'feature_names_in_'):
+                y_scaler.feature_names_in_ = np.array([normalize_stream_column(n) for n in y_scaler.feature_names_in_])
+
             self.surrogate_models[unit_type] = {
-                'x_scaler': model_bundle['x_scaler'], 'y_scaler': model_bundle['y_scaler'],
+                'x_scaler': x_scaler, 'y_scaler': y_scaler,
                 'coeffs': {k: v for k, v in model_bundle.items() if k not in ['model', 'x_scaler', 'y_scaler']}
             }
             print(f"   - Loaded and processed '{unit_type}' surrogate model from '{model_path}'")
@@ -100,7 +111,12 @@ class WWTPPlantOptimizer:
         print(f"   - Clarifier-specific Decision Variables: {self.clarifier_dvars}")
 
         df_influent = self.xls['raw_influent_compound_conc']
-        self.influent_params = pd.Series(df_influent.Value.values, index=df_influent.Variable).to_dict()
+        raw_influent = pd.Series(df_influent.Value.values, index=df_influent.Variable).to_dict()
+        self.influent_params = {}
+        for key, value in raw_influent.items():
+            prefixed = key if key.startswith(('inf_', 'influent_')) else f"inf_{key}"
+            normalized = normalize_stream_column(prefixed)
+            self.influent_params[normalized] = value
         
         c1_outputs = self.surrogate_models['clarifier']['y_scaler'].feature_names_in_
         self.all_components = sorted(list(set([self._unify_comp_name(c) for c in c1_outputs])))
@@ -219,7 +235,7 @@ class WWTPPlantOptimizer:
             
             if self.optimization_target == 'aao':
                 if unit_name == 'A1':
-                    C_raw = self.influent_params.get(f"inf_{unified_name}", 0)
+                    C_raw = self.influent_params.get(f"influent_{unified_name}{CONCENTRATION_SUFFIX}", 0)
                     C_int = m.stream_conc['O3', unified_name]
                     C_ext = m.C1_wastage_conc[unified_name]
                     inlet_mass = (C_raw * m.Q_raw_inf) + (C_int * m.Q_int) + (C_ext * m.Q_ext)
@@ -231,7 +247,7 @@ class WWTPPlantOptimizer:
             
             elif self.optimization_target == 'clarifier': # AS Plant Logic
                 if unit_name == 'CSTR1':
-                    C_raw = self.influent_params.get(f"inf_{unified_name}", 0)
+                    C_raw = self.influent_params.get(f"influent_{unified_name}{CONCENTRATION_SUFFIX}", 0)
                     C_int = m.stream_conc['CSTR1', unified_name] # Recycle from own effluent
                     C_ext = m.C1_wastage_conc[unified_name]
                     inlet_mass = (C_raw * m.Q_raw_inf) + (C_int * m.Q_int) + (C_ext * m.Q_ext)
@@ -245,7 +261,7 @@ class WWTPPlantOptimizer:
                     if M_name in ['Q_was', 'Q_ext', 'Q_int']: return b.X[M_name] == 0.0
                     if M_name in self.bounds: return b.X[M_name] == sum(self.bounds[M_name]) / 2.0
                     else: raise ValueError(f"Cannot fix parameter '{M_name}': no bounds or specific rule defined.")
-                C_raw = self.influent_params.get(f"inf_{unified_name}", 0)
+                C_raw = self.influent_params.get(f"influent_{unified_name}{CONCENTRATION_SUFFIX}", 0)
                 return b.X[M_name] == C_raw
 
             return pyo.Constraint.Skip
@@ -293,9 +309,9 @@ class WWTPPlantOptimizer:
             if unit_type == 'cstr':
                 return m.stream_conc[unit_name, unified_name] == unscaled_Y
             else: # clarifier unit
-                if 'Effluent' in K_name:
+                if K_name.startswith('effluent_'):
                     return m.C1_effluent_conc[unified_name] == unscaled_Y
-                elif 'Wastage' in K_name:
+                elif K_name.startswith('wastage_'):
                     return m.C1_wastage_conc[unified_name] == unscaled_Y
             return pyo.Constraint.Skip
         # --- REVISED SECTION END ---
@@ -341,7 +357,7 @@ class WWTPPlantOptimizer:
 
         print("\n---> Optimal Solution Found <---")
         print(f"   - Overall Satisfaction Level (lambda_o): {pyo.value(m.lambda_o):.4f}")
-        print(f"   - Saving results to data/optimization_results.xlsx")
+        print(f"   - Saving results to data/results/optimization/{self.optimization_target}/optimization_results.xlsx")
 
         dvar_data = []
         if self.optimization_target in ['aao', 'clarifier']: # AAO and AS Plant have same DV structure
@@ -368,7 +384,7 @@ class WWTPPlantOptimizer:
             for u, dv in m.cstr_dvars: dvar_data.append({'Process Unit': u, 'Variable': dv, 'Optimal Value': pyo.value(m.cstr_dvars[u, dv])})
         df_dvars = pd.DataFrame(dvar_data)
 
-        influent_data = [{'Variable': key.replace('inf_', ''), 'Value (mg/L)': value} for key, value in self.influent_params.items()]
+        influent_data = [{'Variable': strip_prefix_and_units(key), 'Value (mg/L)': value} for key, value in self.influent_params.items()]
         df_influent = pd.DataFrame(influent_data)
 
         predicted_data = []
@@ -376,14 +392,14 @@ class WWTPPlantOptimizer:
             for u in self.active_cstr_units:
                 for c in self.all_components: predicted_data.append({'Component': f"{c}_{u}", 'Predicted Value (mg/L)': pyo.value(m.stream_conc[u, c])})
             for c in self.all_components:
-                predicted_data.append({'Component': f"{c}_Effluent", 'Predicted Value (mg/L)': pyo.value(m.C1_effluent_conc[c])})
-                predicted_data.append({'Component': f"{c}_Wastage", 'Predicted Value (mg/L)': pyo.value(m.C1_wastage_conc[c])})
+                predicted_data.append({'Component': f"effluent_{c}", 'Predicted Value (mg/L)': pyo.value(m.C1_effluent_conc[c])})
+                predicted_data.append({'Component': f"wastage_{c}", 'Predicted Value (mg/L)': pyo.value(m.C1_wastage_conc[c])})
         elif self.optimization_target == 'cstr':
-            for c in self.all_components: predicted_data.append({'Component': f"{c}_Effluent", 'Predicted Value (mg/L)': pyo.value(m.stream_conc['CSTR1', c])})
+            for c in self.all_components: predicted_data.append({'Component': f"{c}_CSTR1", 'Predicted Value (mg/L)': pyo.value(m.stream_conc['CSTR1', c])})
         df_predicted = pd.DataFrame(predicted_data)
 
-        output_path = os.path.join('data', 'optimization_results.xlsx')
-        os.makedirs('data', exist_ok=True)
+        output_path = os.path.join('data', 'results', 'optimization', self.optimization_target, 'optimization_results.xlsx')
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
         try:
             with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
@@ -412,7 +428,7 @@ if __name__ == "__main__":
         
         optimization_target = choice_map[user_choice]
         
-        config_file = os.path.join('data', 'optimization_config.xlsx')
+        config_file = os.path.join('data', 'config', 'optimization_config.xlsx')
         optimizer = WWTPPlantOptimizer(config_path=config_file)
         optimizer.build_pyomo_model(optimization_target=optimization_target)
         optimizer.solve(solver='ipopt', tee=True, max_iterations=100000)
@@ -420,7 +436,7 @@ if __name__ == "__main__":
         
     except FileNotFoundError as e:
         print(f"\nCRITICAL ERROR: A required file was not found. Details: {e}", file=sys.stderr)
-        print("Please ensure the 'data/optimization_config.xlsx' file exists.", file=sys.stderr)
+        print("Please ensure the 'data/config/optimization_config.xlsx' file exists.", file=sys.stderr)
     except Exception as e:
         print(f"\nAN UNEXPECTED ERROR OCCURRED: {e}", file=sys.stderr)
         traceback.print_exc()

@@ -27,8 +27,11 @@ dependencies = [
     "scikit-optimize>=0.10.2",
     "scipy>=1.15.3",
     "statsmodels>=0.14.5",
+    "torch>=2.9.1",
+    "torchaudio>=2.9.1",
+    "torchvision>=0.24.1",
     "tqdm>=4.67.1",
     "twilio>=9.7.0",
-    "xgboost>=3.0.3",
+    "xgboost==3.0.3",
     "xlsxwriter>=3.2.5",
 ]
