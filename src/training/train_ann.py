@@ -36,6 +36,8 @@ try:
 except ValueError:
     N_SPLITS = 10
 
+RANDOM_STATE = 42
+
 # Paths
 FILE_PATH = os.path.join('data', 'data.xlsx')
 MACHINE_LEARNING_MODEL = 'ann'

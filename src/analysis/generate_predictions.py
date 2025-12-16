@@ -265,7 +265,7 @@ class SurrogateModelPredictor:
                 
                 # Move result back to CPU for numpy conversion
                 Y_pred_scaled = Y_pred_scaled_tensor.cpu().numpy()
-        elif model_type in ['pls', 'lightgbm', 'xgboost', 'random_forest', 'knn', 'gam']:
+        elif model_type in ['ann', 'pls', 'lightgbm', 'xgboost', 'random_forest', 'knn', 'svr', 'clefo']:
             Y_pred_scaled = model.predict(X_scaled)
         else:
             raise NotImplementedError(f"Prediction logic for model type '{model_type}' is not implemented.")
