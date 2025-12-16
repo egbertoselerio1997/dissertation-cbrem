@@ -3,37 +3,37 @@ from typing import Dict, Iterable, Tuple
 
 # Maps from legacy ASM identifiers to descriptive, snake_case names.
 COMPONENT_NAME_MAP: Dict[str, str] = {
-    'S_I': 'soluble_inert_cod',
-    'S_F': 'readily_biodegradable_cod',
-    'S_A': 'acetate',
-    'X_I': 'particulate_inert_cod',
-    'X_S': 'slowly_biodegradable_cod',
-    'X_H': 'heterotrophic_biomass',
-    'X_AUT': 'nitrifying_biomass',
-    'X_PAO': 'phosphate_accumulating_biomass',
-    'X_PP': 'stored_polyphosphate',
-    'X_PHA': 'stored_polyhydroxyalkanoate',
-    'S_O2': 'dissolved_oxygen',
-    'S_N2': 'dinitrogen',
-    'S_NH4': 'ammonia_nitrogen',
-    'S_NO3': 'nitrate_nitrite_nitrogen',
-    'S_PO4': 'orthophosphate',
-    'S_ALK': 'alkalinity_as_caco3',
-    'X_MeOH': 'metal_hydroxide_solids',
-    'X_MeP': 'metal_phosphate_solids',
-    'H2O': 'water',
+    'S_I': 'S_I', # 'soluble_inert_cod'
+    'S_F': 'S_F', # 'readily_biodegradable_cod'
+    'S_A': 'S_A', # 'acetate'
+    'X_I': 'X_I', # 'particulate_inert_cod'
+    'X_S': 'X_S', # 'slowly_biodegradable_cod'
+    'X_H': 'X_H', # 'heterotrophic_biomass'
+    'X_AUT': 'X_AUT', # 'nitrifying_biomass'
+    'X_PAO': 'X_PAO', # 'phosphate_accumulating_biomass'
+    'X_PP': 'X_PP', # 'stored_polyphosphate'
+    'X_PHA': 'X_PHA', # 'stored_polyhydroxyalkanoate'
+    'S_O2': 'S_O2', # 'dissolved_oxygen'
+    'S_N2': 'S_N2', # 'dinitrogen'
+    'S_NH4': 'S_NH4', # 'ammonia_nitrogen'
+    'S_NO3': 'S_NO3', # 'nitrate_nitrite_nitrogen'
+    'S_PO4': 'S_PO4', # 'orthophosphate'
+    'S_ALK': 'S_ALK', # 'alkalinity_as_caco3'
+    'X_MeOH': 'X_MeOH', # 'metal_hydroxide_solids'
+    'X_MeP': 'X_MeP', # 'metal_phosphate_solids'
+    'H2O': 'H2O', # 'water'
 }
 
 COMPOSITE_NAME_MAP: Dict[str, str] = {
-    'COD': 'chemical_oxygen_demand',
-    'BOD': 'biochemical_oxygen_demand',
-    'TN': 'total_nitrogen',
-    'TKN': 'total_kjeldahl_nitrogen',
-    'TP': 'total_phosphorus',
-    'TSS': 'total_suspended_solids',
-    'VSS': 'volatile_suspended_solids',
-    'TOC': 'total_organic_carbon',
-    'TC': 'total_carbon',
+    'COD': 'COD', # 'chemical_oxygen_demand'
+    'BOD': 'BOD', # 'biochemical_oxygen_demand'
+    'TN': 'TN', # 'total_nitrogen'
+    'TKN': 'TKN', # 'total_kjeldahl_nitrogen'
+    'TP': 'TP', # 'total_phosphorus'
+    'TSS': 'TSS', # 'total_suspended_solids'
+    'VSS': 'VSS', # 'volatile_suspended_solids'
+    'TOC': 'TOC', # 'total_organic_carbon'
+    'TC': 'TC', # 'total_carbon'
 }
 
 STREAM_PREFIX_PATTERNS: Tuple[Tuple[str, str], ...] = (

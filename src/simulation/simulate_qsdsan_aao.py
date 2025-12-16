@@ -8,6 +8,7 @@ from joblib import Parallel, delayed
 import warnings
 from tqdm import tqdm
 import gc
+import uuid
 from scipy.stats import qmc
 
 # Allow importing shared naming utilities
@@ -30,6 +31,8 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
         def formatted_name(prefix: str, compound_id: str) -> str:
             base = canonical_base_name(compound_id) or compound_id
             return f"{prefix}_{base}{CONCENTRATION_SUFFIX}"
+
+        simulation_uid = f"sim-{uuid.uuid4().hex}"
 
         # --- 1. Get the inputs for the current simulation run ---
         current_inputs = inputs
@@ -151,7 +154,8 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
             if not in_data or not out_data: continue
 
             input_row = {
-                'simulation_number': sim_id, 'Q_raw_inf': Q_inf, 'Q_int': Q_int_daily,
+                'simulation_id': simulation_uid, 'simulation_number': sim_id,
+                'Q_raw_inf': Q_inf, 'Q_int': Q_int_daily,
                 'Q_was': Q_was, 'Q_ext': Q_ext, 'V': details['V'], 'KLa': details['KLa']
             }
             for comp_id in all_inf_components:
@@ -160,9 +164,9 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
                 input_row[formatted_name('influent', prop)] = in_data.get(prop, 0)
             cstr_input_rows.append(input_row)
             
-            output_row = {'simulation_number': sim_id}
+            output_row = {'simulation_id': simulation_uid, 'simulation_number': sim_id}
             for comp_id in all_out_components:
-                 output_row[formatted_name('effluent', comp_id)] = out_data.get(comp_id, 0)
+                output_row[formatted_name('effluent', comp_id)] = out_data.get(comp_id, 0)
             cstr_output_rows.append(output_row)
             
         # --- Prepare Clarifier dataset ---
@@ -171,7 +175,7 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
 
         if all([c1_in_data, c1_eff_data, c1_was_data]):
             clarifier_input_row = {
-                'simulation_number': sim_id, 'Q_raw_inf': Q_inf,
+                'simulation_id': simulation_uid, 'simulation_number': sim_id, 'Q_raw_inf': Q_inf,
                 'C1_surface_area': C1_surface_area, 'C1_height': C1_height,
                 'Q_int': Q_int_daily, 'Q_was': Q_was, 'Q_ext': Q_ext
             }
@@ -180,7 +184,7 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
             for prop in composite_properties:
                 clarifier_input_row[formatted_name('influent', prop)] = c1_in_data.get(prop, 0)
             
-            clarifier_output_row = {'simulation_number': sim_id}
+            clarifier_output_row = {'simulation_id': simulation_uid, 'simulation_number': sim_id}
             for comp in all_out_components:
                 clarifier_output_row[formatted_name('effluent', comp)] = c1_eff_data.get(comp, 0)
                 clarifier_output_row[formatted_name('wastage', comp)] = c1_was_data.get(comp, 0)
@@ -208,9 +212,7 @@ def run_single_simulation(sim_id, inputs, init_cond_df):
 def run_simulation():
     config_dir = os.path.join('data', 'config')
     data_filepath = os.path.join(config_dir, 'simulation_training_config.xlsx')
-    backup_dir = os.path.join('data', 'results', 'simulation', 'backup')
     os.makedirs(config_dir, exist_ok=True)
-    os.makedirs(backup_dir, exist_ok=True)
 
     print(f"Loading input variables from {data_filepath}...")
     try:
@@ -314,17 +316,6 @@ def run_simulation():
         all_input_clarifier_rows.extend(batch_input_c1)
         all_output_clarifier_rows.extend(batch_output_c1)
         all_flows_rows.extend(batch_flows)
-
-        backup_files = {
-            'all_input_cstr.csv': pd.DataFrame(batch_input_cstr), 'all_output_cstr.csv': pd.DataFrame(batch_output_cstr),
-            'all_input_clarifier.csv': pd.DataFrame(batch_input_c1), 'all_output_clarifier.csv': pd.DataFrame(batch_output_c1),
-            'all_input_flows.csv': pd.DataFrame(batch_flows)
-        }
-        for filename, df in backup_files.items():
-            if not df.empty:
-                path = os.path.join(backup_dir, filename)
-                is_new_file = not os.path.exists(path)
-                df.to_csv(path, mode='a', header=is_new_file, index=False)
         
         del batch_results, successful_results
         gc.collect()
@@ -342,8 +333,8 @@ def run_simulation():
         inflow_keys.update(k for k in row.keys() if k.startswith('influent_'))
     inf_cols = sorted(inflow_keys)
 
-    final_cstr_cols = ['simulation_number', 'Q_raw_inf', 'Q_int', 'Q_was', 'Q_ext', 'V', 'KLa'] + inf_cols
-    final_clarifier_cols = ['simulation_number', 'Q_raw_inf', 'C1_surface_area', 'C1_height', 'Q_int', 'Q_was', 'Q_ext'] + inf_cols
+    final_cstr_cols = ['simulation_id', 'simulation_number', 'Q_raw_inf', 'Q_int', 'Q_was', 'Q_ext', 'V', 'KLa'] + inf_cols
+    final_clarifier_cols = ['simulation_id', 'simulation_number', 'Q_raw_inf', 'C1_surface_area', 'C1_height', 'Q_int', 'Q_was', 'Q_ext'] + inf_cols
     
     # Create DataFrames from the newly generated data
     df_new_input_cstr = pd.DataFrame(all_input_cstr_rows).reindex(columns=final_cstr_cols)
@@ -351,6 +342,15 @@ def run_simulation():
     df_new_input_clarifier = pd.DataFrame(all_input_clarifier_rows).reindex(columns=final_clarifier_cols)
     df_new_output_clarifier = pd.DataFrame(all_output_clarifier_rows)
     df_new_flows = pd.DataFrame(all_flows_rows)
+
+    def reorder_with_ids(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty: return df
+        front = [c for c in ['simulation_id', 'simulation_number'] if c in df.columns]
+        rest = [c for c in df.columns if c not in front]
+        return df[front + rest]
+
+    df_new_output_cstr = reorder_with_ids(df_new_output_cstr)
+    df_new_output_clarifier = reorder_with_ids(df_new_output_clarifier)
 
     if not df_new_input_cstr.empty:
         df_new_input_cstr['simulation_number'] = range(cstr_start_offset + 1, cstr_start_offset + len(df_new_input_cstr) + 1)

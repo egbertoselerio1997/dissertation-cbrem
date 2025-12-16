@@ -70,6 +70,8 @@ def load_and_prepare_data(filepath: str):
     print("1. Loading data...")
     df_input = pd.read_excel(filepath, sheet_name="all_input_" + process_unit)
     df_output = pd.read_excel(filepath, sheet_name="all_output_" + process_unit)
+    df_input = df_input.drop(columns=['simulation_id'], errors='ignore')
+    df_output = df_output.drop(columns=['simulation_id'], errors='ignore')
     df_output = rename_concentration_columns(df_output)
 
     # Handle Long vs Wide format
