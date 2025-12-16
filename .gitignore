@@ -52,6 +52,10 @@ Thumbs.db
 
 
 /data/results
+/data/training_data
+/models
+/src/qsdsan_functions
+
 /plots
 
 .venv
