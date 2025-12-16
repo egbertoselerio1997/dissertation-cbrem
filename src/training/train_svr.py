@@ -275,7 +275,7 @@ def main():
         return
 
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
-    Y_log = np.log(Y + 1)
+    Y_log = np.log(Y)
 
     # Prepare Scaled Data for Optimization
     sc_x_temp = StandardScaler().fit(X.values)
@@ -297,7 +297,7 @@ def main():
         X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
         Y_tr_log, Y_te = Y_log.iloc[tr_idx], Y.iloc[te_idx]
         
-        Y_tr_real = np.exp(Y_tr_log) - 1
+        Y_tr_real = np.exp(Y_tr_log)
 
         sc_x = StandardScaler().fit(X_tr.values)
         sc_y = StandardScaler().fit(Y_tr_log.values)
@@ -321,10 +321,10 @@ def main():
         
         # Predictions
         Y_pred_tr_s = model.predict(X_tr_s)
-        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s)) - 1
+        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s))
         
         Y_pred_te_s = model.predict(X_te_s)
-        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s)) - 1
+        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s))
         
         # Metrics
         for i, col in enumerate(y_cols):
@@ -377,7 +377,7 @@ def main():
 
     # 5. Generate Predictions & Plots
     Y_pred_s_full = final_model.predict(X_s)
-    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full)) - 1
+    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
     
     print("   - Generating Final Parity Plot...")
     plot_parity(Y, Y_pred_full, y_cols, os.path.join(IMG_DIR, 'parity_plot_final_model.png'), "Final Model")

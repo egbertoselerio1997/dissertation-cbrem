@@ -51,10 +51,8 @@ coverage.xml
 Thumbs.db
 
 
-/data/*
-!/data/config/
-!/data/config/**
-/plots/*
+/data/results
+/plots
 
 .venv
 /src/__pycache__
