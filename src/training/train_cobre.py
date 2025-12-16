@@ -629,8 +629,13 @@ def main():
         'MAPE': mape_per_sim
     })
     
-    copy_file_path = os.path.join('data', 'results', 'training', 'data_current_mape.xlsx')
-    target_sheets = ['all_input_cstr', 'all_output_cstr', 'all_input_clarifier', 'all_output_clarifier']
+    # Define path: results --> training --> clefo --> data_current_mape.xlsx
+    mape_file_dir = os.path.join('data', 'results', 'training', MACHINE_LEARNING_MODEL)
+    copy_file_path = os.path.join(mape_file_dir, 'data_current_mape.xlsx')
+    
+    # Define target sheets
+    target_sheets = ['all_input_cstr', 'all_output_cstr', 'all_input_clarifier', 'all_output_clarifier', 'all_input_flows']
+    
     os.makedirs(os.path.dirname(copy_file_path), exist_ok=True)
     
     with pd.ExcelWriter(copy_file_path, engine='xlsxwriter') as writer:
@@ -639,16 +644,13 @@ def main():
                 # Read original sheet
                 df_orig = pd.read_excel(FILE_PATH, sheet_name=sheet_name)
                 
-                # Only merge MAPE if the sheet corresponds to the currently trained process unit
-                if process_unit in sheet_name:
-                    if 'simulation_number' in df_orig.columns:
-                        # Merge MAPE based on simulation number
-                        df_orig = pd.merge(df_orig, mape_df, on='simulation_number', how='left')
-                    else:
-                        # Fallback if simulation_number missing (unlikely based on schema)
-                        df_orig['MAPE'] = np.nan
+                if 'simulation_number' in df_orig.columns:
+                    # Merge MAPE based on simulation number
+                    # We use how='left' to keep all original rows. 
+                    # Rows not in the training set (filtered out) will get NaN MAPE.
+                    df_orig = pd.merge(df_orig, mape_df, on='simulation_number', how='left')
                 else:
-                    # For sheets not involved in current training, add empty MAPE column
+                    # Fallback if simulation_number missing
                     df_orig['MAPE'] = np.nan
                 
                 df_orig.to_excel(writer, sheet_name=sheet_name, index=False)
