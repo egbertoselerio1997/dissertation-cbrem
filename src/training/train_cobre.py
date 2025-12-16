@@ -65,10 +65,6 @@ os.makedirs(IMG_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 os.makedirs(HYPERPARAM_DIR, exist_ok=True)
 
-# Device selection: prefer CUDA, else CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
 # --- Data Loading ---
 def load_and_prepare_data(filepath: str):
     print("1. Loading data...")
@@ -165,7 +161,16 @@ class CoupledCLEFOModel(nn.Module):
 
 # --- Training Logic ---
 def train_model_pytorch(X_train, Y_train, Z_train, learning_rate, batch_size, l1_lambda, epochs, verbose=False):
-    model = CoupledCLEFOModel(Y_train.shape[1], X_train.shape[1], Z_train.shape[1], solver_type).to(device)
+    # Determine device based on batch_size
+    if batch_size != -1:
+        train_device = torch.device("cpu")
+    else:
+        train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if verbose:
+        print(f"Training on device: {train_device}")
+
+    model = CoupledCLEFOModel(Y_train.shape[1], X_train.shape[1], Z_train.shape[1], solver_type).to(train_device)
     criterion = nn.MSELoss()
     
     if optimizer_type == 'adam': opt = optim.Adam(model.parameters(), lr=learning_rate)
@@ -176,7 +181,7 @@ def train_model_pytorch(X_train, Y_train, Z_train, learning_rate, batch_size, l1
     dataset = WastewaterDataset(X_train, Y_train, Z_train)
     
     if batch_size <= 0:
-        X_g, Y_g, Z_g = dataset.X.to(device), dataset.Y.to(device), dataset.Z.to(device)
+        X_g, Y_g, Z_g = dataset.X.to(train_device), dataset.Y.to(train_device), dataset.Z.to(train_device)
         iterator = range(epochs)
         if verbose: iterator = tqdm(iterator, desc="Training")
         
@@ -196,7 +201,7 @@ def train_model_pytorch(X_train, Y_train, Z_train, learning_rate, batch_size, l1
         
         for _ in iterator:
             for X_b, Y_b, Z_b in loader:
-                X_b, Y_b, Z_b = X_b.to(device), Y_b.to(device), Z_b.to(device)
+                X_b, Y_b, Z_b = X_b.to(train_device), Y_b.to(train_device), Z_b.to(train_device)
                 loss = criterion(model(X_b, Z_b), Y_b) + \
                        l1_lambda * (torch.norm(model.B, 1) + torch.norm(model.Theta, 1))
                 if torch.isnan(loss): return None
@@ -206,10 +211,12 @@ def train_model_pytorch(X_train, Y_train, Z_train, learning_rate, batch_size, l1
     return model
 
 def predict_pytorch(model, X, Z):
+    # Determine device from model parameters
+    pred_device = next(model.parameters()).device
     model.eval()
     with torch.no_grad():
-        return model(torch.tensor(X, dtype=torch.float32).to(device), 
-                     torch.tensor(Z, dtype=torch.float32).to(device)).cpu().numpy()
+        return model(torch.tensor(X, dtype=torch.float32).to(pred_device), 
+                     torch.tensor(Z, dtype=torch.float32).to(pred_device)).cpu().numpy()
 
 # --- Hyperparameter Optimization ---
 def get_hyperparameters(X_s, Y_s, Z_s):
