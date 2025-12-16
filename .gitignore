@@ -1,3 +1,1 @@
-/data/*
-!/data/config/
-!/data/config/**
+/plots/*

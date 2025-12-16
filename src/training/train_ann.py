@@ -42,10 +42,12 @@ try:
     N_SPLITS = int(input("Enter the number of folds for cross-validation (default: 10): ") or 10)
 except ValueError:
     N_SPLITS = 10
+    
+RANDOM_STATE = 42
 
 # Paths
 CONFIG_DIR = os.path.join('data', 'config')
-FILE_PATH = os.path.join(CONFIG_DIR, 'data.xlsx')
+FILE_PATH = os.path.join(CONFIG_DIR, 'simulation_training_config.xlsx')
 MACHINE_LEARNING_MODEL = 'ann'
 BASE_OUTPUT_DIR = os.path.join('data', 'results', 'training', MACHINE_LEARNING_MODEL, process_unit)
 OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, 'train_stat.xlsx')
@@ -364,7 +366,7 @@ def main():
 
     # 1. Load Data
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
-    Y_log = np.log(Y)
+    Y_log = np.log(Y + 1)
 
     # Prepare Scaled Data for Optimization
     sc_x_temp = StandardScaler().fit(X)
@@ -393,7 +395,7 @@ def main():
         Y_tr_log, Y_te = Y_log.iloc[tr_idx], Y.iloc[te_idx]
         
         # Physical values for training parity plot
-        Y_tr_real = np.exp(Y_tr_log)
+        Y_tr_real = np.exp(Y_tr_log) - 1
 
         sc_x = StandardScaler().fit(X_tr)
         sc_y = StandardScaler().fit(Y_tr_log)
@@ -409,11 +411,11 @@ def main():
         # --- Predictions ---
         # Train Set
         Y_pred_tr_s = predict_ann(model, X_tr_s)
-        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s))
+        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s)) - 1
         
         # Test Set
         Y_pred_te_s = predict_ann(model, X_te_s)
-        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s))
+        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s)) - 1
         
         # --- Metrics Calculation & Storage ---
         for i, col in enumerate(y_cols):
@@ -469,7 +471,7 @@ def main():
 
     # 5. Generate Predictions & Plots (Final Model)
     Y_pred_s_full = predict_ann(final_model, X_s)
-    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
+    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full)) - 1
     
     print("   - Generating Final Parity Plot...")
     plot_parity(Y, Y_pred_full, y_cols, 

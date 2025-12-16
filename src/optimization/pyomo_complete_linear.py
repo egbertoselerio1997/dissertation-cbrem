@@ -272,8 +272,10 @@ class WWTPPlantOptimizer:
         b.w_xx = pyo.Var(b.L, bounds=w_bounds)
 
         # Variables for piecewise linearization of exponential
-        y_log_min = np.log(max(1e-6, self.UNSCALED_VAR_BOUNDS[0])) # Avoid log(0)
-        y_log_max = np.log(self.UNSCALED_VAR_BOUNDS[1])
+        y_lower = max(0.0, self.UNSCALED_VAR_BOUNDS[0]) # log1p domain requires >= -1; clamp at 0 for concentrations
+        y_upper = max(y_lower + 1e-9, self.UNSCALED_VAR_BOUNDS[1]) # ensure a positive span
+        y_log_min = np.log1p(y_lower)
+        y_log_max = np.log1p(y_upper)
         b.Y_log = pyo.Var(b.K, bounds=(y_log_min, y_log_max), initialize=0)
         b.unscaled_Y = pyo.Var(b.K, bounds=self.UNSCALED_VAR_BOUNDS, initialize=10)
 
@@ -409,7 +411,7 @@ class WWTPPlantOptimizer:
         q_values = np.arange(K)
         pw_domain_pts = (w_min + (q_values / (K - 1))**PIECEWISE_SPACING * (w_max - w_min)).tolist()
 
-        # Define the piecewise linear approximation for unscaled_Y = exp(Y_log)
+        # Define the piecewise linear approximation for unscaled_Y = expm1(Y_log)
         b.exp_approximation = pyo.Piecewise(
             b.K,                  # Indexed by K
             b.unscaled_Y,         # y-var: The resulting concentration
@@ -417,7 +419,7 @@ class WWTPPlantOptimizer:
             pw_pts=pw_domain_pts,
             pw_repn=PLA_TYPE,
             pw_constr_type='EQ',  # y = f(x)
-            f_rule=lambda model, k, x: pyo.exp(x) # The function to approximate
+            f_rule=lambda model, k, x: pyo.exp(x) - 1 # The function to approximate
         )
 
         @b.Constraint(b.K)

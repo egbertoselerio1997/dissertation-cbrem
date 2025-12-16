@@ -124,7 +124,7 @@ except ImportError:
 PROJECT_SRC = Path(__file__).resolve().parents[1]
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
-from naming import CONCENTRATION_SUFFIX, normalize_stream_column, rename_concentration_columns, strip_prefix_and_units
+from naming import CONCENTRATION_SUFFIX, canonical_base_name, normalize_stream_column, rename_concentration_columns, strip_prefix_and_units
 
 
 class SurrogateModelPredictor:
@@ -223,6 +223,7 @@ class SurrogateModelPredictor:
             prefixed = key if key.startswith(('inf_', 'influent_')) else f"inf_{key}"
             normalized = normalize_stream_column(prefixed)
             self.influent_params[normalized] = value
+        self._compute_missing_influent_features(raw_influent)
         
         df_dvar_config = xls_config['decision_var']
         self.cstr_dvars_list = df_dvar_config[df_dvar_config['Process Unit'] == 'cstr']['I_variables'].tolist()
@@ -236,6 +237,57 @@ class SurrogateModelPredictor:
         if val.empty:
             raise ValueError(f"Could not find DVar '{variable_name}' for unit '{unit}' in results file.")
         return val.iloc[0]
+
+    def _compute_missing_influent_features(self, raw_influent: dict):
+        """
+        Fill in composite influent properties (e.g., BOD, COD, TSS) that the
+        trained models expect but are not explicitly listed in the optimization
+        configuration.
+        """
+        required = set()
+        for unit_type in ('cstr', 'clarifier'):
+            required.update(self.feature_names.get(unit_type, {}).get('x', []))
+        missing = {f for f in required if f.startswith('influent_') and f not in self.influent_params}
+        if not missing:
+            return
+
+        try:
+            import qsdsan as qs
+            from qsdsan import processes as pc  # type: ignore
+        except ImportError:
+            print("     - WARNING: qsdsan is not available; missing influent composites will default to 0.", file=sys.stderr)
+            for feat in missing:
+                self.influent_params.setdefault(feat, 0.0)
+            return
+
+        try:
+            cmps = pc.create_asm2d_cmps()
+            qs.set_thermo(cmps)
+            ws = qs.WasteStream('prediction_influent', T=293.15)
+            conc = {}
+            for key, val in raw_influent.items():
+                token = key[4:] if key.startswith('inf_') else key
+                token = token[9:] if token.startswith('influent_') else token
+                conc[token] = val
+            ws.set_flow_by_concentration(1.0, concentrations=conc, units=('m3/d', 'mg/L'))
+
+            composite_tokens = ('COD', 'BOD', 'TN', 'TKN', 'TP', 'TSS', 'VSS', 'TOC', 'TC')
+            for token in composite_tokens:
+                getter = getattr(ws, f'get_{token}', None)
+                value = getter() if callable(getter) else getattr(ws, token, None)
+                if callable(value):
+                    value = value()
+                base = canonical_base_name(token) or token.lower()
+                feature = f'influent_{base}{CONCENTRATION_SUFFIX}'
+                if feature in missing and value is not None:
+                    self.influent_params[feature] = float(value)
+
+            for feat in missing:
+                self.influent_params.setdefault(feat, 0.0)
+        except Exception as e:
+            print(f"     - WARNING: Failed to compute composite influent properties. Reason: {e}", file=sys.stderr)
+            for feat in missing:
+                self.influent_params.setdefault(feat, 0.0)
 
     def _predict_with_model(self, model_type: str, unit_type: str, X_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -280,7 +332,7 @@ class SurrogateModelPredictor:
                 
                 # Move result back to CPU for numpy conversion
                 Y_pred_scaled = Y_pred_scaled_tensor.cpu().numpy()
-        elif model_type in ['pls', 'lightgbm', 'xgboost', 'random_forest', 'knn', 'gam']:
+        elif model_type in ['pls', 'lightgbm', 'xgboost', 'random_forest', 'knn', 'gam', 'svr']:
             Y_pred_scaled = model.predict(X_scaled)
         else:
             raise NotImplementedError(f"Prediction logic for model type '{model_type}' is not implemented.")

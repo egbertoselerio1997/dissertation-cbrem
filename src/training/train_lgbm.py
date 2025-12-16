@@ -42,7 +42,7 @@ except ValueError:
 
 # Paths
 CONFIG_DIR = os.path.join('data', 'config')
-FILE_PATH = os.path.join(CONFIG_DIR, 'data.xlsx')
+FILE_PATH = os.path.join(CONFIG_DIR, 'simulation_training_config.xlsx')
 MACHINE_LEARNING_MODEL = 'lightgbm'
 BASE_OUTPUT_DIR = os.path.join('data', 'results', 'training', MACHINE_LEARNING_MODEL, process_unit)
 OUTPUT_FILE_PATH = os.path.join(BASE_OUTPUT_DIR, 'train_stat.xlsx')
@@ -281,7 +281,7 @@ def main():
         return
 
     X, Y, x_cols, y_cols = load_and_prepare_data(FILE_PATH)
-    Y_log = np.log(Y)
+    Y_log = np.log(Y + 1)
 
     # Prepare Scaled Data for Optimization
     sc_x_temp = StandardScaler().fit(X.values)
@@ -303,7 +303,7 @@ def main():
         X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
         Y_tr_log, Y_te = Y_log.iloc[tr_idx], Y.iloc[te_idx]
         
-        Y_tr_real = np.exp(Y_tr_log)
+        Y_tr_real = np.exp(Y_tr_log) - 1
 
         sc_x = StandardScaler().fit(X_tr.values)
         sc_y = StandardScaler().fit(Y_tr_log.values)
@@ -330,10 +330,10 @@ def main():
         
         # Predictions
         Y_pred_tr_s = model.predict(X_tr_s)
-        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s))
+        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s)) - 1
         
         Y_pred_te_s = model.predict(X_te_s)
-        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s))
+        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s)) - 1
         
         # Metrics
         for i, col in enumerate(y_cols):
@@ -389,7 +389,7 @@ def main():
 
     # 5. Generate Predictions & Plots
     Y_pred_s_full = final_model.predict(X_s)
-    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
+    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full)) - 1
     
     print("   - Generating Final Parity Plot...")
     plot_parity(Y, Y_pred_full, y_cols, os.path.join(IMG_DIR, 'parity_plot_final_model.png'), "Final Model")

@@ -129,7 +129,7 @@ def analyze_model_coefficients():
             print(f"Invalid input. Please enter one of {valid_units}.")
 
     MODEL_PATH = os.path.join('data', 'results', 'training', 'clefo', process_unit, f'{process_unit}.joblib')
-    DATA_FILE_PATH = os.path.join('data', 'config', 'data.xlsx')
+    DATA_FILE_PATH = os.path.join('data', 'config', 'simulation_training_config.xlsx')
     
     # The output Excel file will be saved in the same directory as the model.
     model_directory = os.path.dirname(MODEL_PATH)
