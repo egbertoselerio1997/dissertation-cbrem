@@ -288,10 +288,10 @@ class WWTPPlantOptimizer:
             This rule performs two critical steps to link the surrogate model's output
             to the physical variables in the optimization model:
             1. Inverse Scaling: Converts the scaled model output (b.Y_s) back to the
-               log-transformed scale (Y_log).
-            2. Exponentiation: Applies the exponential function (pyo.exp) to convert
+               log-transformed scale (Y_log) using log1p-based statistics.
+            2. Exponentiation: Applies the exponential minus one (pyo.exp - 1) to convert
                the log-transformed value (Y_log) into the actual physical
-               concentration (Y), ensuring Y is always positive.
+               concentration (Y), ensuring Y stays on the original scale.
             """
             k_idx = k_map[K_name]
             mu, sigma = y_scaler.mean_[k_idx], y_scaler.scale_[k_idx]
@@ -299,8 +299,8 @@ class WWTPPlantOptimizer:
             # Step 1: Inverse scaling to get the log-transformed value Y_log (Y')
             Y_log = b.Y_s[K_name] * sigma + mu
             
-            # Step 2: Apply exponentiation to get the physical value Y
-            unscaled_Y = pyo.exp(Y_log)
+            # Step 2: Apply exponentiation minus one to get the physical value Y
+            unscaled_Y = pyo.exp(Y_log) - 1
             
             # Get the base component name
             unified_name = self._unify_comp_name(K_name)

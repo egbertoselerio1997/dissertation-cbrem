@@ -479,7 +479,7 @@ def main():
 
     # 1. Load Data (Updated to return simulation numbers)
     X, Y, x_cols, y_cols, sim_nums = load_and_prepare_data(FILE_PATH)
-    Y_log = np.log(Y)
+    Y_log = np.log1p(Y)
     m = X.shape[1]
 
     # Prepare Scaled Data for Optimization
@@ -510,7 +510,7 @@ def main():
         Y_tr_log, Y_te = Y_log.iloc[tr_idx], Y.iloc[te_idx]
         
         # Physical values for training parity plot
-        Y_tr_real = np.exp(Y_tr_log)
+        Y_tr_real = np.expm1(Y_tr_log)
 
         sc_x = StandardScaler().fit(X_tr)
         sc_y = StandardScaler().fit(Y_tr_log)
@@ -528,11 +528,11 @@ def main():
         # --- Predictions ---
         # Train Set
         Y_pred_tr_s = predict_pytorch(model, X_tr_s, Z_tr_s)
-        Y_pred_tr = np.exp(sc_y.inverse_transform(Y_pred_tr_s))
+        Y_pred_tr = np.expm1(sc_y.inverse_transform(Y_pred_tr_s))
         
         # Test Set
         Y_pred_te_s = predict_pytorch(model, X_te_s, Z_te_s)
-        Y_pred_te = np.exp(sc_y.inverse_transform(Y_pred_te_s))
+        Y_pred_te = np.expm1(sc_y.inverse_transform(Y_pred_te_s))
         
         # --- Metrics Calculation & Storage ---
         for i, col in enumerate(y_cols):
@@ -589,7 +589,7 @@ def main():
 
     # 5. Generate Predictions & Plots (Final Model)
     Y_pred_s_full = predict_pytorch(final_model, X_s, Z_s)
-    Y_pred_full = np.exp(sc_y_final.inverse_transform(Y_pred_s_full))
+    Y_pred_full = np.expm1(sc_y_final.inverse_transform(Y_pred_s_full))
     
     print("   - Generating Final Parity Plot...")
     plot_parity(Y, Y_pred_full, y_cols, 

@@ -271,9 +271,9 @@ class WWTPPlantOptimizer:
         b.w_yx = pyo.Var(b.K, b.M, bounds=w_bounds)
         b.w_xx = pyo.Var(b.L, bounds=w_bounds)
 
-        # Variables for piecewise linearization of exponential
-        y_log_min = np.log(max(1e-6, self.UNSCALED_VAR_BOUNDS[0])) # Avoid log(0)
-        y_log_max = np.log(self.UNSCALED_VAR_BOUNDS[1])
+        # Variables for piecewise linearization of expm1 (inverse of log1p)
+        y_log_min = np.log1p(self.UNSCALED_VAR_BOUNDS[0])
+        y_log_max = np.log1p(self.UNSCALED_VAR_BOUNDS[1])
         b.Y_log = pyo.Var(b.K, bounds=(y_log_min, y_log_max), initialize=0)
         b.unscaled_Y = pyo.Var(b.K, bounds=self.UNSCALED_VAR_BOUNDS, initialize=10)
 
@@ -394,7 +394,7 @@ class WWTPPlantOptimizer:
             rhs_Theta = sum(coeffs['Theta'][k_idx, l_map[l_p]] * b.w_xx[l_p] for l_p in b.L)
             return term1 - term2 - term3 == rhs_const + rhs_B + rhs_Theta
 
-        # --- Piecewise Linear Approximation of the Exponential Function ---
+        # --- Piecewise Linear Approximation of the Exponential Minus One ---
         # Define the relationship between the scaled variable Y_s and the log-transformed Y_log
         @b.Constraint(b.K)
         def y_log_definition_rule(b, K_name):
@@ -409,7 +409,7 @@ class WWTPPlantOptimizer:
         q_values = np.arange(K)
         pw_domain_pts = (w_min + (q_values / (K - 1))**PIECEWISE_SPACING * (w_max - w_min)).tolist()
 
-        # Define the piecewise linear approximation for unscaled_Y = exp(Y_log)
+        # Define the piecewise linear approximation for unscaled_Y = exp(Y_log) - 1
         b.exp_approximation = pyo.Piecewise(
             b.K,                  # Indexed by K
             b.unscaled_Y,         # y-var: The resulting concentration
@@ -417,7 +417,7 @@ class WWTPPlantOptimizer:
             pw_pts=pw_domain_pts,
             pw_repn=PLA_TYPE,
             pw_constr_type='EQ',  # y = f(x)
-            f_rule=lambda model, k, x: pyo.exp(x) # The function to approximate
+            f_rule=lambda model, k, x: pyo.exp(x) - 1 # The function to approximate
         )
 
         @b.Constraint(b.K)
