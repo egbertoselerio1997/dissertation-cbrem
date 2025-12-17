@@ -251,7 +251,6 @@ def run_simulation():
     vary_inputs = False
     if num_simulations > 1:
         vary_inputs = input("Vary inputs using Latin Hypercube Sampling? (y/n): ").lower() == 'y'
-        if not vary_inputs: num_simulations = 1
     batch_size = int(input("Enter batch size for processing (e.g., 100): "))
 
     all_input_cstr_rows, all_output_cstr_rows = [], []
